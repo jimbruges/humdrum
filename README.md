@@ -9,6 +9,7 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 - **A Wi-Fi hotspot with a captive portal.** Scan the QR code embossed on the lid, and your phone joins and opens the web UI. There you upload samples, trim, pitch and loop them, and change settings.
 - **LED matrix display** behind a window in the lid shows the current effect, the knob amount and the output level, `REC` while recording, and the **waveform of the sample you just triggered**, filling left to right as it plays.
 - **Optional Modulino Buzzer** as a tone-only test speaker.
+- **Optional Modulino Distance** adds a **Theremin** effect: hand height plays your voice's pitch. It appears in the effect list only while the sensor is plugged in.
 - **Optional internal power bank bay**: a 93 × 61 × 14 mm 5000 mAh bank fits inside, its ports reachable through the right wall next to the UNO Q's USB-C.
 
 ![4-column case](enclosure/renders/render-4col.png)
@@ -24,6 +25,7 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 | Modulino Knob | 1 | Fits any grid slot |
 | Modulino Buttons | 1 to 11 | 3 pads each; use as many as your case has slots |
 | Modulino Buzzer | 0 or 1 | Optional, tone-only |
+| Modulino Distance | 0 or 1 | Optional; enables the Theremin effect. Peel off the protective film! |
 | Qwiic cables (50–100 mm) | 1 per module | Daisy-chained under the lid through the cable slots |
 | M3 heat-set inserts (M3 × 5.7, Ø4.0 hole) | 6 | Tray bosses |
 | M3 × 6 button-head screws | 6 | Lid; meant to be visible |
@@ -81,6 +83,18 @@ Each newly plugged Buttons module arrives at the factory address `0x3E`. The ske
 | LED | Off = empty · on = loaded · flicker = playing · fast blink = recording |
 
 Recordings are auto-trimmed and normalised (both can be switched off), and can be recorded dry or with FX. *Rec over loaded pads* can be turned off to protect your samples.
+
+### Theremin (optional Modulino Distance)
+
+Plug in a Modulino Distance and a ninth effect, **THR**, joins the knob cycle and the web UI. Unplug it and THR disappears; if it was selected, Humdrum falls back to the first effect.
+
+- **Your voice** is pitch-shifted by hand height, up to an octave either way at full amount. Closer is higher, as on a real theremin, and it glides rather than jumping.
+- **An "ether" tone** (a sine with slow vibrato) follows the hand across three octaves, 110–880 Hz, at your voice's loudness. Hum to play it.
+- **The knob** sets how much of both you get; 0 is fully dry.
+- **The LED matrix** shows `THR`, and the row above the knob bar shows hand height instead of output level.
+- **Range:** *theremin near mm* (default 40) and *theremin far mm* (default 350) in settings set the distances that count as closest and farthest. Nothing in range counts as far.
+
+The sensor's ST driver (VL53L4CD, or VL53L4ED on some boards) is vendored in `sketch/src/` under its BSD licence, so App Lab can build the sketch on a board with no internet.
 
 ### Modulino Buzzer (optional)
 

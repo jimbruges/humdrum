@@ -123,10 +123,13 @@ class PitchShift(Effect):
         self.phase = 0.0
 
     def process(self, x, amount):
+        return self.shift(x, self.max_semi * amount)
+
+    def shift(self, x: np.ndarray, semitones: float) -> np.ndarray:
         self.line.write(x)
-        if amount < 0.01:
+        if abs(semitones) < 0.05:
             return x
-        ratio = 2.0 ** (self.max_semi * amount / 12.0)
+        ratio = 2.0 ** (semitones / 12.0)
         n = len(x)
         rate = (1.0 - ratio) / self.WINDOW
         ph = (self.phase + rate * np.arange(1, n + 1)) % 1.0
@@ -262,6 +265,54 @@ class Radio(Effect):
         return (x * (1 - mix) + y * mix).astype(np.float32)
 
 
+class Theremin(Effect):
+    """Hand height over a Modulino Distance plays your voice like a theremin.
+
+    Closer is higher, as on the real thing: the voice is pitch-shifted up to an
+    octave either way, gliding rather than jumping, and a sine 'ether' tone with a
+    slow vibrato follows the hand over three octaves at the loudness of your voice.
+    `hand` is 0 (far, or nothing in range) .. 1 (closest), set from the sensor.
+    """
+
+    name, short = "Theremin", "THR"
+    RANGE_SEMI = 12
+    GLIDE = 0.25  # per block: ~40 ms to settle at 512-sample blocks
+    TONE_LOW_HZ, TONE_OCTAVES = 110.0, 3
+    VIBRATO_HZ, VIBRATO_DEPTH = 5.5, 0.009  # about +/- 0.15 semitone
+
+    def __init__(self) -> None:
+        self.shifter = PitchShift("", "", 0)
+        self.hand = 0.0
+        self.h = 0.0  # glided hand position
+        self.env = 0.0
+        self.osc_phase = 0.0
+        self.t = 0
+
+    def process(self, x, amount):
+        self.h += (self.hand - self.h) * self.GLIDE
+        voice = self.shifter.shift(x, amount * self.RANGE_SEMI * (2 * self.h - 1))
+        n = len(x)
+        t = (self.t + np.arange(n)) / SR
+        self.t += n
+        if amount < 0.01:
+            self.env = 0.0
+            return voice
+        rms = float(np.sqrt(np.mean(x * x)))
+        env = rms if rms > self.env else self.env * 0.85  # follow the voice, release gently
+        ramp = np.linspace(self.env, env, n, dtype=np.float32)
+        self.env = env
+        freq = self.TONE_LOW_HZ * 2 ** (self.TONE_OCTAVES * self.h)
+        inst = freq * (1 + self.VIBRATO_DEPTH * np.sin(2 * np.pi * self.VIBRATO_HZ * t))
+        phase = self.osc_phase + np.cumsum(2 * np.pi * inst / SR)
+        self.osc_phase = float(phase[-1] % (2 * np.pi))
+        tone = np.sin(phase).astype(np.float32) * ramp * 1.4
+        return voice * (1 - 0.35 * amount) + tone * amount
+
+    def reset(self):
+        self.shifter.reset()
+        self.env = 0.0
+
+
 def make_effects() -> list[Effect]:
     return [
         PitchShift("Pitch up", "UP", 12),
@@ -271,6 +322,7 @@ def make_effects() -> list[Effect]:
         Echo(),
         Reverb(),
         Radio(),
+        Theremin(),  # only offered while a Modulino Distance is plugged in
     ]
 
 

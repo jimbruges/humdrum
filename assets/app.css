@@ -108,6 +108,10 @@ h2 { margin: 0; font: 600 12px var(--mono); text-transform: uppercase; letter-sp
 .amount label { font: 11px var(--mono); text-transform: uppercase; color: var(--ink-2); }
 input[type=range] { width: 100%; accent-color: var(--accent); }
 .meters { margin-top: 12px; display: grid; gap: 6px; }
+#hand-row { grid-template-columns: 30px 1fr 64px; gap: 8px; }
+#hand-row[hidden] { display: none; }
+#m-hand { background: linear-gradient(var(--accent), var(--accent)) 0 0 / var(--w, 0%) 100% no-repeat, var(--pad-empty); }
+.fx-btn[hidden] { display: none; }
 .meter { display: grid; grid-template-columns: 30px 1fr; align-items: center; font: 10px var(--mono); color: var(--ink-2); text-transform: uppercase; }
 .meter i {
   height: 6px; border-radius: 3px; background:

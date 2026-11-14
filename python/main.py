@@ -25,6 +25,7 @@ from arduino.app_utils import App, Bridge
 import buzzer
 import display
 from engine import Engine
+from fx import Theremin
 from slots import MAX_PADS, SlotBank, decode_wav
 
 try:
@@ -68,6 +69,8 @@ DEFAULTS = {
     "max_rec_s": 10,
     "hold_ms": 600,
     "knob_step": 0.02,
+    "theremin_near_mm": 40,
+    "theremin_far_mm": 350,
     "buzzer_mode": "off",
     "block": 512,
     "input_device": "jack:1",
@@ -75,7 +78,7 @@ DEFAULTS = {
 }
 # what the web UI may change, with (min, max) for numbers
 LIMITS = {
-    "fx_index": (0, 6), "fx_amount": (0.0, 1.0), "mic_gain_db": (-12.0, 36.0), "gate_db": (-90.0, -20.0),
+    "fx_index": (0, 7), "theremin_near_mm": (10, 300), "theremin_far_mm": (100, 1200), "fx_amount": (0.0, 1.0), "mic_gain_db": (-12.0, 36.0), "gate_db": (-90.0, -20.0),
     "monitor_level": (0.0, 1.5), "sample_level": (0.0, 1.5), "master": (0.0, 1.5), "max_rec_s": (1, 30),
     "hold_ms": (200, 3000), "knob_step": (0.005, 0.1), "block": (256, 2048),
 }
@@ -100,11 +103,24 @@ bank = SlotBank(DATA)
 engine = Engine(settings, bank)
 ui = WebUI()
 
-topology = {"modules": 0, "knob": False, "addrs": "", "buzzer": False}
+topology = {"modules": 0, "knob": False, "addrs": "", "buzzer": False, "distance": False}
+THEREMIN = next(i for i, fx in enumerate(engine.effects) if isinstance(fx, Theremin))
+hand_mm = -1  # latest Modulino Distance reading, -1 = nothing in range
 follower = buzzer.BuzzerFollower()
 mcu_calls: queue.SimpleQueue = queue.SimpleQueue()  # Bridge.call is not allowed inside handlers
 save_due = 0.0
 banner: tuple[str, float] | None = None  # temporary matrix label, (text, until)
+
+
+def fx_available() -> list[int]:
+    """Effects you can pick right now: the theremin needs its sensor."""
+    return [i for i in range(len(engine.effects)) if i != THEREMIN or topology["distance"]]
+
+
+def ensure_fx_available() -> None:
+    if settings["fx_index"] not in fx_available():
+        settings["fx_index"] = 0
+        save_settings_soon()
 
 
 def save_settings_soon() -> None:
@@ -135,6 +151,7 @@ def apply_settings(changes: dict) -> dict:
             reopen |= k in DEVICE_KEYS
             if k == "hold_ms":
                 mcu_calls.put(("set_hold_ms", int(v)))
+    ensure_fx_available()
     if reopen:
         engine.reopen_devices()
     save_settings_soon()
@@ -151,10 +168,15 @@ def pads_connected() -> int:
 # ---------------------------------------------------------------------------
 
 
-def on_topology(modules: int, knob: bool, addrs: str, has_buzzer: bool = False) -> None:
+def on_topology(modules: int, knob: bool, addrs: str, has_buzzer: bool = False, has_distance: bool = False) -> None:
     global banner
-    topology.update(modules=int(modules), knob=bool(knob), addrs=str(addrs), buzzer=bool(has_buzzer))
-    log.info("topology: %d button modules, knob=%s (%s)", modules, knob, addrs)
+    topology.update(modules=int(modules), knob=bool(knob), addrs=str(addrs), buzzer=bool(has_buzzer),
+                    distance=bool(has_distance))
+    log.info("topology: %d button modules, knob=%s (%s), buzzer=%s, distance=%s",
+             modules, knob, addrs, bool(has_buzzer), bool(has_distance))
+    if not has_distance:
+        on_hand(-1)
+    ensure_fx_available()
     banner = (f"{pads_connected():>2}P" if modules else "NO", time.monotonic() + 1.5)
     mcu_calls.put(("set_hold_ms", int(settings["hold_ms"])))
     push_state()
@@ -182,7 +204,9 @@ def on_knob_turn(delta: int) -> None:
 
 def on_knob_click() -> None:
     log.info("knob click: next effect")
-    settings["fx_index"] = (settings["fx_index"] + 1) % len(engine.effects)
+    available = fx_available()
+    pos = available.index(settings["fx_index"]) if settings["fx_index"] in available else -1
+    settings["fx_index"] = available[(pos + 1) % len(available)]
     settings["fx_bypass"] = False
     save_settings_soon()
     push_state()
@@ -201,7 +225,22 @@ Bridge.provide("pad_up", on_pad_up)
 Bridge.provide("pad_hold", on_pad_hold)
 Bridge.provide("knob_turn", on_knob_turn)
 Bridge.provide("knob_click", on_knob_click)
+def hand_closeness(mm: int) -> float:
+    """0 = far or nothing in range, 1 = at the near limit."""
+    near, far = settings["theremin_near_mm"], max(settings["theremin_far_mm"], settings["theremin_near_mm"] + 10)
+    if mm < 0 or mm >= far:
+        return 0.0
+    return min(1.0, (far - mm) / (far - near))
+
+
+def on_hand(mm: int) -> None:
+    global hand_mm
+    hand_mm = int(mm)
+    engine.effects[THEREMIN].hand = hand_closeness(hand_mm)
+
+
 Bridge.provide("knob_long", on_knob_long)
+Bridge.provide("hand", on_hand)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +252,8 @@ def full_state() -> dict:
     n = max(pads_connected(), 0)
     return {
         "settings": settings,
-        "fx": [{"name": fx.name, "short": fx.short} for fx in engine.effects],
+        "fx": [{"name": fx.name, "short": fx.short, "available": i in fx_available()}
+               for i, fx in enumerate(engine.effects)],
         "topology": topology,
         "pads_connected": n,
         "slots": [bank.describe(p) for p in range(MAX_PADS) if p < n or bank.slots[p].loaded],
@@ -411,7 +451,9 @@ def loop() -> None:
         frame = display.render_wave(wave_env, _wave[1], settings["fx_amount"], engine.level_out)
     else:
         fx = engine.effects[settings["fx_index"] % len(engine.effects)]
-        frame = display.render(fx.short, settings["fx_amount"], engine.level_out, dim=settings["fx_bypass"])
+        # the theremin swaps the level row for the hand height, so you can see what you're playing
+        row6 = engine.effects[THEREMIN].hand if settings["fx_index"] == THEREMIN else engine.level_out
+        frame = display.render(fx.short, settings["fx_amount"], row6, dim=settings["fx_bypass"])
     if frame != _last_frame:
         try:
             Bridge.notify("draw", frame)
@@ -428,6 +470,8 @@ def loop() -> None:
             "fx_index": settings["fx_index"],
             "fx_amount": round(settings["fx_amount"], 3),
             "fx_bypass": settings["fx_bypass"],
+            "hand_mm": hand_mm,
+            "hand": round(engine.effects[THEREMIN].hand, 3),
             "rec": engine.recording_pad,
             "rec_progress": round(engine.rec_progress, 3),
             "playing": sorted(engine.playing),

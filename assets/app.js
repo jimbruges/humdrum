@@ -64,7 +64,12 @@ function renderFx() {
   }
   const idx = meter.fx_index ?? state.settings.fx_index;
   const bypass = meter.fx_bypass ?? state.settings.fx_bypass;
-  [...list.children].forEach((b, i) => b.classList.toggle("active", i === idx));
+  [...list.children].forEach((b, i) => {
+    b.classList.toggle("active", i === idx);
+    b.hidden = !state.fx[i].available;  // e.g. the theremin needs a Modulino Distance
+  });
+  const theremin = state.fx[idx] && state.fx[idx].short === "THR";
+  $("#hand-row").hidden = !theremin;
   $(".fx").classList.toggle("bypassed", bypass);
   $("#bypass").classList.toggle("on", bypass);
   const amount = $("#amount");
@@ -83,6 +88,8 @@ function renderMeter() {
   const pct = (v) => `${Math.min(100, Math.round(Math.sqrt(v || 0) * 100))}%`;
   $("#m-in").style.setProperty("--w", pct(meter.in));
   $("#m-out").style.setProperty("--w", pct(meter.out));
+  $("#m-hand").style.setProperty("--w", `${Math.round((meter.hand || 0) * 100)}%`);
+  $("#hand-mm").textContent = meter.hand_mm >= 0 ? `${meter.hand_mm} mm` : "no hand";
   if (!state) return;
   renderFx();
   const playing = new Set(meter.playing || []);
@@ -124,7 +131,7 @@ function renderPads() {
   const total = Math.max(connected, extra.length ? Math.max(...extra) + 1 : 0);
   const modules = Math.ceil(total / 3);
   $("#no-pads").hidden = connected > 0;
-  $("#topo").textContent = `${connected} pads${state.topology.knob ? " · knob" : ""}${state.topology.buzzer ? " · buzzer" : ""}`;
+  $("#topo").textContent = `${connected} pads${state.topology.knob ? " · knob" : ""}${state.topology.buzzer ? " · buzzer" : ""}${state.topology.distance ? " · distance" : ""}`;
 
   wrap.innerHTML = "";
   for (let m = 0; m < modules; m++) {
@@ -305,6 +312,8 @@ const SETTINGS = [
   { key: "hold_ms", label: "hold to rec ms", min: 200, max: 3000, step: 50, fmt: (v) => v },
   { key: "max_rec_s", label: "max rec s", min: 1, max: 30, step: 1, fmt: (v) => v },
   { key: "knob_step", label: "knob speed", min: 0.005, max: 0.1, step: 0.005, fmt: (v) => Math.round(v * 1000) },
+  { key: "theremin_near_mm", label: "theremin near mm", min: 10, max: 300, step: 5, fmt: (v) => v },
+  { key: "theremin_far_mm", label: "theremin far mm", min: 100, max: 1200, step: 10, fmt: (v) => v },
   { key: "record_post_fx", label: "record with fx", type: "toggle" },
   { key: "rec_overwrite", label: "rec over loaded pads", type: "toggle" },
   { key: "auto_trim", label: "auto-trim silence", type: "toggle" },
@@ -362,6 +371,7 @@ function renderSettings() {
     <dt>modules</dt><dd>${t.modules} (${t.addrs || "none"})</dd>
     <dt>knob</dt><dd>${t.knob ? "yes" : "no"}</dd>
     <dt>buzzer</dt><dd>${t.buzzer ? "yes" : "no"}</dd>
+    <dt>distance</dt><dd>${t.distance ? "yes" : "no"}</dd>
     <dt>input</dt><dd>${state.devices.input}</dd>
     <dt>output</dt><dd>${state.devices.output}</dd>`;
 }

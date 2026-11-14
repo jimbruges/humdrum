@@ -1,8 +1,9 @@
 // Humdrum — MCU side (STM32U585)
 //
 // Owns everything on the Qwiic bus and the on-board LED matrix:
-//   * discovers any number of Modulino Buttons (3 pads each), one Modulino Knob
-//     and an optional Modulino Buzzer (a tone-only "speaker" for testing)
+//   * discovers any number of Modulino Buttons (3 pads each), one Modulino Knob,
+//     an optional Modulino Buzzer (a tone-only "speaker" for testing) and an
+//     optional Modulino Distance (hand height for the theremin effect)
 //   * gives each newly plugged Buttons module its own I2C address automatically
 //   * reports pad / knob events to Linux over the Bridge
 //   * shows pad states on the button LEDs and frames sent by Linux on the matrix
@@ -15,6 +16,11 @@
 #include <Wire.h>
 #include <vector>
 
+// ST's time-of-flight drivers, vendored in src/ so the sketch builds offline.
+// Modulino Distance boards carry either a VL53L4CD or a VL53L4ED.
+#include "src/vl53l4cd/vl53l4cd_class.h"
+#include "src/vl53l4ed/vl53l4ed_class.h"
+
 // ---------------------------------------------------------------------------
 // Bus layout
 // ---------------------------------------------------------------------------
@@ -24,6 +30,9 @@ static const uint8_t PINSTRAP_BUTTONS = 0x7C;
 static const uint8_t PINSTRAP_KNOB_A = 0x74;
 static const uint8_t PINSTRAP_KNOB_B = 0x76;
 static const uint8_t PINSTRAP_BUZZER = 0x3C;
+// The Distance module is a bare ST sensor, not a Modulino MCU: fixed address and
+// no pinstrap byte, so it's handled separately from the scan.
+static const uint8_t TOF_ADDR = 0x29;
 
 static const uint8_t BUTTONS_DEFAULT_ADDR = 0x3E;  // factory address
 // New Buttons modules are moved into this range, in plug-in order, so pad
@@ -44,6 +53,9 @@ static const uint32_t POLL_INTERVAL_MS = 4;
 static const uint32_t KNOB_REPORT_MS = 15;
 static const uint32_t KNOB_LONG_MS = 700;
 static const uint32_t DEBOUNCE_MS = 12;
+static const uint32_t TOF_POLL_MS = 10;
+static const uint32_t TOF_REPORT_MIN_MS = 25;   // at most ~40 updates/s over the Bridge
+static const uint32_t TOF_REPORT_MAX_MS = 250;  // and at least 4/s so Linux knows it's alive
 
 // Pad LED states, as sent by Linux in set_states()
 enum PadState : uint8_t {
@@ -70,6 +82,13 @@ int moduleCount = 0;
 
 uint8_t knobAddr = 0;  // 0 = not present
 uint8_t buzzerAddr = 0;
+
+VL53L4CD* tofCD = nullptr;  // whichever variant answered
+VL53L4ED* tofED = nullptr;
+int16_t handMm = -1;  // -1: nothing in range
+int16_t handReported = -2;
+uint32_t lastTofPoll = 0;
+uint32_t lastTofReport = 0;
 int16_t knobLast = 0;
 int32_t knobAccum = 0;
 bool knobDown = false;
@@ -140,6 +159,71 @@ void flashModule(uint8_t addr) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Modulino Distance
+// ---------------------------------------------------------------------------
+
+bool tofReady() {
+  return tofCD || tofED;
+}
+
+void tofStart() {
+  tofCD = new VL53L4CD(&Wire1, -1);
+  if (tofCD->InitSensor() == VL53L4CD_ERROR_NONE) {
+    tofCD->VL53L4CD_SetRangeTiming(20, 0);
+    tofCD->VL53L4CD_StartRanging();
+    return;
+  }
+  delete tofCD;
+  tofCD = nullptr;
+  tofED = new VL53L4ED(&Wire1, -1);
+  if (tofED->InitSensor() == VL53L4ED_ERROR_NONE) {
+    tofED->VL53L4ED_SetRangeTiming(20, 0);
+    tofED->VL53L4ED_StartRanging();
+    return;
+  }
+  delete tofED;
+  tofED = nullptr;
+}
+
+void tofStop() {
+  delete tofCD;
+  delete tofED;
+  tofCD = nullptr;
+  tofED = nullptr;
+  handMm = -1;
+  handReported = -2;
+}
+
+void pollTof(uint32_t now) {
+  if (!tofReady() || now - lastTofPoll < TOF_POLL_MS) return;
+  lastTofPoll = now;
+  uint8_t ready = 0;
+  if (tofCD) {
+    tofCD->VL53L4CD_CheckForDataReady(&ready);
+    if (ready) {
+      VL53L4CD_Result_t r;
+      tofCD->VL53L4CD_ClearInterrupt();
+      tofCD->VL53L4CD_GetResult(&r);
+      handMm = r.range_status == 0 ? r.distance_mm : -1;
+    }
+  } else {
+    tofED->VL53L4ED_CheckForDataReady(&ready);
+    if (ready) {
+      VL53L4ED_ResultsData_t r;
+      tofED->VL53L4ED_ClearInterrupt();
+      tofED->VL53L4ED_GetResult(&r);
+      handMm = r.range_status == 0 ? r.distance_mm : -1;
+    }
+  }
+  bool changed = abs(handMm - handReported) >= 3 || (handMm < 0) != (handReported < 0);
+  if ((changed && now - lastTofReport >= TOF_REPORT_MIN_MS) || now - lastTofReport >= TOF_REPORT_MAX_MS) {
+    Bridge.notify("hand", (int)handMm);
+    handReported = handMm;
+    lastTofReport = now;
+  }
+}
+
 bool isReserved(uint8_t a) {
   for (uint8_t r : RESERVED_ADDRS)
     if (r == a) return true;
@@ -184,10 +268,15 @@ void scanBus() {
   bool seen[MAX_MODULES] = { false };
   bool knobSeen = false;
   bool buzzerSeen = false;
+  bool tofSeen = false;
   bool defaultSeen = false;
 
   for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
     if (!probe(addr)) continue;
+    if (addr == TOF_ADDR) {  // no pinstrap byte to read; don't disturb its register pointer
+      tofSeen = true;
+      continue;
+    }
     uint8_t pin = 0, scratch[3];
     if (!modRead(addr, scratch, 1, &pin)) continue;
 
@@ -234,6 +323,13 @@ void scanBus() {
     topologyDirty = true;
   }
   if (!defaultSeen) enrolHold = false;
+  if (tofSeen && !tofReady()) {
+    tofStart();
+    if (tofReady()) topologyDirty = true;
+  } else if (!tofSeen && tofReady()) {
+    tofStop();
+    topologyDirty = true;
+  }
   if (!buzzerSeen && buzzerAddr) {
     buzzerAddr = 0;
     topologyDirty = true;
@@ -251,7 +347,7 @@ void reportTopology() {
     if (i) addrs += ",";
     addrs += String(modules[i].addr, HEX);
   }
-  Bridge.notify("topology", moduleCount, knobAddr != 0, addrs, buzzerAddr != 0);
+  Bridge.notify("topology", moduleCount, knobAddr != 0, addrs, buzzerAddr != 0, tofReady());
   for (int i = 0; i < moduleCount; i++) modules[i].ledMask = 0xFF;  // force LED refresh
 }
 
@@ -429,6 +525,7 @@ void loop() {
     lastPoll = now;
     pollButtons(now);
     pollKnob(now);
+    pollTof(now);
     refreshLeds(now);
   }
 
