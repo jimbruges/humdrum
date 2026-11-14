@@ -86,7 +86,7 @@ Recordings are auto-trimmed and normalised (both can be switched off), and can b
 
 ### Theremin (optional Modulino Distance)
 
-Plug in a Modulino Distance and a ninth effect, **THR**, joins the knob cycle and the web UI. Unplug it and THR disappears; if it was selected, Humdrum falls back to the first effect.
+Plug in a Modulino Distance and an eighth effect, **THR**, joins the knob cycle and the web UI. Unplug it and THR disappears; if it was selected, Humdrum falls back to the first effect.
 
 - **Your voice** is pitch-shifted by hand height, up to an octave either way at full amount. Closer is higher, as on a real theremin, and it glides rather than jumping.
 - **An "ether" tone** (a sine with slow vibrato) follows the hand across three octaves, 110–880 Hz, at your voice's loudness. Hum to play it.
@@ -107,7 +107,7 @@ The buzzer only plays a frequency for a set time on a piezo, so it can't reprodu
 
 ## Deploying
 
-1. **App.** Copy `humdrum/` into App Lab (or onto the board under `~/ArduinoApps/`) and run it. App Lab builds the sketch and installs `scipy` from `requirements.txt`.
+1. **App.** Copy `humdrum/` into App Lab (or onto the board under `~/ArduinoApps/`) and run it. App Lab builds the sketch. The Python side needs only numpy, which the App Lab image already has.
 2. **Audio devices.** The defaults are `jack:1` in and `jack:1` out. If you hear nothing, open the web UI → settings and try `jack:2` / `jack:3`, or an ALSA name (`plughw:CARD=…,DEV=…`). *System → reopen audio* applies the change. The current status appears under *system*.
 3. **Hotspot + captive portal.** On the board (over SSH or `adb shell`):
    ```bash
@@ -122,7 +122,7 @@ The buzzer only plays a frequency for a set time on a piezo, so it can't reprodu
 
 ## Enclosure
 
-The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, exposed button-head screws and an orange accent on the snap standoffs. The electronics strip is always on the right. It carries the LED matrix window, the engraved legend and the QR code. The Modulino grid grows to the left in **columns of 3 slots** (48 × 32 mm pitch, holes on the Modulino's 32 × 16 mm pattern). Every slot has Qwiic pass-through slots on both sides, so the cables run hidden under the lid.
+The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, exposed button-head screws and an orange accent on the snap standoffs. The electronics strip is always on the right. It carries the LED matrix window, the engraved legend and the QR code. An **FX key** right of the window spells out the matrix's effect codes (UP pitch up, DWN pitch down, ROB robot, BIT bitcrush, ECO echo, VRB reverb, RAD radio, THR theremin). The strip is identical at every case width, so every size has it. The Modulino grid grows to the left in **columns of 3 slots** (48 × 32 mm pitch, holes on the Modulino's 32 × 16 mm pattern). Every slot has Qwiic pass-through slots on both sides, so the cables run hidden under the lid.
 
 | Columns | Slots | Max pads (knob in one slot) | Case W × D × H | Fits a 256 mm bed? |
 |---|---|---|---|---|
