@@ -33,7 +33,7 @@ DEMO_ENV = ROOT / "host" / "portal" / "wifi.env"
 LOCAL_ENV = ROOT / "host" / "portal" / "wifi.local.env"
 
 # must match the lid's QrRecess feature
-CENTER = (104.0, -36.0)
+CENTER = (104.0, 36.0)
 FLOOR_Z = 35.2
 TOP_Z = 36.0
 CODE_MM = 36.25  # leaves a ~2.9 mm recessed quiet zone inside the 42 mm recess

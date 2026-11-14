@@ -38,9 +38,9 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 
 ### Audio jacks (Media Carrier)
 
-The carrier has three 3.5 mm jacks: **Line Out** (mono, balanced), **Mic In / Headphones** (TRRS combo) and **Ear Out**. Two of them point out of the case's rear wall. The third faces into the case and isn't used.
+The carrier has three 3.5 mm jacks: **Line Out** (mono, balanced), **Mic In / Headphones** (TRRS combo) and **Ear Out**. Two of them, on the UNO Q's digital-header edge, point out of the case's **front wall**. The third faces into the case and isn't used.
 
-> ⚠️ The datasheet doesn't say which physical jack is which. Plug in and check, then label the rear wall to match. If the line out turns out to be the inward-facing jack, use a short 3.5 mm extension.
+> ⚠️ The datasheet doesn't say which physical jack is which. Plug in and check, then label the front wall to match. If the line out turns out to be the inward-facing jack, use a short 3.5 mm extension.
 
 ---
 
@@ -123,17 +123,17 @@ Files: `enclosure/<n>col/` has the tray STL, lid STL and STEP. `enclosure/humdru
 
 Both openings are on the **right wall**, so all power cables leave from one side:
 
-- **UNO Q USB-C**: a 14 × 7.5 mm slot, 13.9–27.9 mm from the board's front edge, centred 1.5 mm above the UNO Q's top surface. The position comes from the datasheet's top view, with about 1 mm of slack each way.
+- **UNO Q USB-C**: a 14 × 7.5 mm slot near the front of the wall, 9.2–23.2 mm back from the board's front edge, centred 1.5 mm above the UNO Q's top surface. The position comes from the datasheet's top view, with about 1 mm of slack each way.
 - **Power bank ports**: a 44 × 12 mm slot near the front of the same wall. It sits between the two right-hand screw bosses, which also act as end stops for the bank.
 
 ### Battery bay (optional)
 
-A power bank up to **93 × 61 × 14 mm** lies on the floor along the front of the case, **ports facing the right wall** next to the USB-C. It sits under the QR area and the right-hand Modulino column. The front wall, two rear ribs and one end rib (8 mm tall, 0.6 mm clearance) hold it in place; add a strip of hook-and-loop tape. A short USB-C cable loops **outside** the case from the bank's port to the UNO Q's USB-C, a few cm apart on the same wall. So the bank stays optional, and the unit runs from any USB-C supply without it.
+A power bank up to **93 × 61 × 14 mm** lies on the floor along the rear of the case, behind the UNO Q, **ports facing the right wall** a few cm behind the USB-C. It sits under the QR area and the right-hand Modulino column. The rear wall, two ribs on the board side and one end rib (8 mm tall, 0.6 mm clearance) hold it in place; add a strip of hook-and-loop tape. A short USB-C cable loops **outside** the case from the bank's port to the UNO Q's USB-C, a few cm apart on the same wall. So the bank stays optional, and the unit runs from any USB-C supply without it.
 
 - The bay is in the same place at every width (1–4 columns), and checked clash-free against the tray at 1 and 4 columns.
-- The bank stays below the PCB stack and about 1 mm clear of the Media Carrier's inward-facing jack.
+- The bank sits beside the PCB stack, about 1 mm clear of the Media Carrier's inward-facing jack.
 - The bank's port end stops about 11 mm inside the wall, so normal plugs reach; very short stubby adapters may not.
-- To make room, the front-middle lid screw moved from x = 64 to x = 28 mm.
+- To make room for the bank, the rear-middle lid screw sits at x = 28 mm, and the rear-right screw takes the place of the front-right one (the board now fills that corner).
 - Check that your bank can supply the UNO Q (5 V, up to 3 A at peak). Some banks switch off at low current draw.
 
 ### Qwiic clearance
@@ -141,7 +141,7 @@ A power bank up to **93 × 61 × 14 mm** lies on the floor along the front of th
 The UNO Q's Qwiic connector (QWIIC1) is on the board edge that faces the Modulino grid, about 24–27 mm above the floor. The space where the plug goes in (about 11 × 7 mm, up to the lid) is checked clear of the tray and the lid. A dedicated 10 × 5 mm **Qwiic pass-through** in the lid, just left of the LED matrix window, sits directly above the connector, so the first cable can go straight up to the nearest Modulino.
 
 ![Right wall](enclosure/renders/render-right-wall.png)
-![Battery bay](enclosure/renders/render-battery-bay.png)
+![Layout: UNO Q front-right, power bank rear-right](enclosure/renders/render-layout.png)
 
 ### Printing
 
@@ -169,10 +169,10 @@ The published lid files carry a **public demo** network: SSID `HUMDRUM`, passwor
 
 ### Fit notes: check these before a final print
 
-Positions come from the UNO Q and Media Carrier datasheet drawings. The board sits in the rear-right corner, rotated 180° from the usual UNO orientation:
+Positions come from the UNO Q and Media Carrier datasheet drawings. The board sits in the front-right corner, rotated 180° from the usual UNO orientation (USB-C to the right wall, digital header and jacks to the front):
 
-- **USB-C** cut-out: right wall, 14 × 7.5 mm, spanning 13.9–27.9 mm from the board's front edge, 1.5 mm above the UNO Q's top surface.
-- **Jacks**: two Ø8 mm holes in the rear wall, at 19.3 and 34.3 mm from the board's left edge, 17.3 mm above the floor's underside. Measured off the datasheet drawing.
+- **USB-C** cut-out: right wall, 14 × 7.5 mm, spanning 9.2–23.2 mm back from the board's front edge, 1.5 mm above the UNO Q's top surface.
+- **Jacks**: two Ø8 mm holes in the front wall, at 19.3 and 34.3 mm from the board's left edge, 17.3 mm above the floor's underside. Measured off the datasheet drawing; the edge was confirmed on a real Media Carrier.
 - **Stack height**: assumes a 7.6 mm gap from carrier to UNO Q, putting the top of the UNO Q headers 0.5 mm under the lid. **This is the one number not stated in the datasheets.** If your stack is taller, raise `Ht`; if shorter, the jacks and USB-C sit a little high in their holes.
 - **LED matrix window**: 30 × 17 mm, over the matrix at its datasheet position.
 
