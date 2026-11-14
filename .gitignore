@@ -1,0 +1,10 @@
+# Your own hotspot credentials and anything generated from them
+host/portal/wifi.local.env
+enclosure/local/
+
+# Runtime data written by the app (samples, settings)
+data/
+
+__pycache__/
+*.pyc
+.DS_Store

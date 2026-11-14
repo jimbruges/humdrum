@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#e9e8e4">
+  <title>Humdrum</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo">H</span>
+      <div>
+        <h1>HUMDRUM</h1>
+        <p class="sub">voice fx / sample pads</p>
+      </div>
+    </div>
+    <div class="status">
+      <span id="conn" class="dot off" title="connection"></span>
+      <span id="topo">— pads</span>
+    </div>
+  </header>
+
+  <div id="cna-hint" class="hint" hidden>
+    Uploading files may not work in this pop-up window. Open
+    <b><span class="url"></span></b> in your browser instead.
+  </div>
+
+  <main>
+    <!-- FX ------------------------------------------------------------------>
+    <section class="panel fx">
+      <div class="panel-head">
+        <h2><span class="num">01</span> mic fx</h2>
+        <button id="bypass" class="chip">bypass</button>
+      </div>
+      <div id="fx-list" class="fx-list"></div>
+      <div class="amount">
+        <label for="amount">amount</label>
+        <input id="amount" type="range" min="0" max="1" step="0.01">
+        <output id="amount-val" class="mono">0</output>
+      </div>
+      <div class="meters">
+        <div class="meter"><span>in</span><i id="m-in"></i></div>
+        <div class="meter"><span>out</span><i id="m-out"></i></div>
+      </div>
+    </section>
+
+    <!-- PADS ---------------------------------------------------------------->
+    <section class="panel pads-panel">
+      <div class="panel-head">
+        <h2><span class="num">02</span> pads</h2>
+        <button id="stop-all" class="chip">stop all</button>
+      </div>
+      <p class="help">Tap a pad to upload a sound. Hold a hardware pad to record from the mic.</p>
+      <div id="pads" class="pads"></div>
+      <p id="no-pads" class="empty" hidden>No Modulino Buttons found. Plug one in &mdash; it gets its address automatically.</p>
+    </section>
+
+    <!-- SETTINGS ------------------------------------------------------------>
+    <section class="panel settings">
+      <div class="panel-head"><h2><span class="num">03</span> settings</h2></div>
+      <div class="grid-settings" id="settings"></div>
+      <details class="system">
+        <summary>system</summary>
+        <div class="sys-row">
+          <button data-sys="rescan" class="chip">rescan bus</button>
+          <button data-sys="reopen_audio" class="chip">reopen audio</button>
+          <button data-sys="reset_addresses" class="chip warn">reset button addresses</button>
+        </div>
+        <p class="help">Reset moves every Buttons module back to its factory address. Then unplug them all
+          and plug them back in one by one, in the order you want the pads numbered.</p>
+        <dl class="diag" id="diag"></dl>
+      </details>
+    </section>
+  </main>
+
+  <!-- Slot editor -------------------------------------------------------->
+  <dialog id="editor">
+    <form method="dialog" class="ed">
+      <div class="ed-head">
+        <span class="padno mono" id="ed-no">01</span>
+        <input id="ed-name" maxlength="24" placeholder="name" autocomplete="off">
+        <button value="close" class="x" aria-label="close">&times;</button>
+      </div>
+      <div class="wave-wrap">
+        <canvas id="ed-wave" width="600" height="120"></canvas>
+        <div class="trim" id="trim-a"></div><div class="trim" id="trim-b"></div>
+      </div>
+      <div class="ed-grid">
+        <label>gain <input id="ed-gain" type="range" min="0" max="2" step="0.01"></label>
+        <label>pitch <input id="ed-pitch" type="range" min="-12" max="12" step="1"><output id="ed-pitch-v" class="mono"></output></label>
+        <label>start <input id="ed-start" type="range" min="0" max="1" step="0.001"></label>
+        <label>end <input id="ed-end" type="range" min="0" max="1" step="0.001"></label>
+      </div>
+      <div class="seg" id="ed-mode">
+        <button type="button" data-mode="oneshot">one-shot</button>
+        <button type="button" data-mode="gate">gate</button>
+        <button type="button" data-mode="loop">loop</button>
+      </div>
+      <div class="ed-actions">
+        <button type="button" id="ed-play" class="chip solid">&#9654; play</button>
+        <button type="button" id="ed-reverse" class="chip">reverse</button>
+        <button type="button" id="ed-replace" class="chip">replace</button>
+        <a id="ed-download" class="chip">download</a>
+        <button type="button" id="ed-clear" class="chip warn">clear</button>
+      </div>
+      <div class="ed-move">
+        <label>move to pad <select id="ed-move"></select></label>
+      </div>
+    </form>
+  </dialog>
+
+  <input id="file" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac" hidden>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="libs/socket.io.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

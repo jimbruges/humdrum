@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# humdrum-portal on|off|status — switch the UNO Q between the Humdrum hotspot and normal Wi-Fi.
+set -euo pipefail
+source /etc/humdrum/portal.env
+
+case "${1:-status}" in
+  on)
+    nmcli con modify "$CON" autoconnect yes connection.autoconnect-priority 100
+    nmcli con up "$CON"
+    echo "hotspot '$SSID' up — portal at http://$AP_IP/"
+    ;;
+  off)
+    nmcli con modify "$CON" autoconnect no
+    nmcli con down "$CON" || true
+    echo "hotspot off — NetworkManager will rejoin your saved Wi-Fi"
+    ;;
+  status)
+    state=$(nmcli -t -f GENERAL.STATE con show "$CON" 2>/dev/null | cut -d: -f2)
+    echo "hotspot: ${state:-down}   ssid: $SSID   portal: http://$AP_IP/"
+    systemctl is-active --quiet humdrum-redirect && echo "redirector: running" || echo "redirector: stopped"
+    ;;
+  *)
+    echo "usage: humdrum-portal on|off|status"; exit 1 ;;
+esac

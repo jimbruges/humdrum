@@ -1,0 +1,6 @@
+name: Humdrum
+icon: 🎛️
+description: An extendable sampler and voice changer based on the UNO Q and Media Carrier combined with Modulino modules. Mic in through live FX to the line out, Modulino Buttons as auto-detected sample pads (hold to record), a Modulino Knob for FX amount, and a web UI for uploading samples.
+
+bricks:
+  - arduino:web_ui
