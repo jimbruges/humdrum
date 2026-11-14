@@ -8,14 +8,59 @@ their shortest delay.
 
 Each effect maps one `amount` in 0..1 (the knob) to its parameters, and
 amount == 0 is always fully dry.
+
+Only numpy is used: the App Lab Python image doesn't ship scipy, and a unit at a
+gig has no internet to pip-install it. Filters are short FIRs (np.convolve) or a
+moving-average high-pass, which vectorise where recursive IIRs can't.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from scipy import signal
 
 SR = 48000
+
+
+class FIR:
+    """Streaming FIR filter: keeps the tail of the previous block as history."""
+
+    def __init__(self, taps: np.ndarray) -> None:
+        self.taps = taps.astype(np.float32)
+        self.hist = np.zeros(len(taps) - 1, np.float32)
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        buf = np.concatenate([self.hist, x])
+        self.hist = buf[len(buf) - len(self.hist):]
+        return np.convolve(buf, self.taps, "valid").astype(np.float32)
+
+    def reset(self) -> None:
+        self.hist[:] = 0
+
+
+def lowpass_taps(fc: float, n: int) -> np.ndarray:
+    """Windowed-sinc low-pass, unity gain at DC."""
+    m = np.arange(n) - (n - 1) / 2
+    h = np.sinc(2 * fc / SR * m) * np.hamming(n)
+    return h / h.sum()
+
+
+def bandpass_taps(f_lo: float, f_hi: float, n: int) -> np.ndarray:
+    return lowpass_taps(f_hi, n) - lowpass_taps(f_lo, n)
+
+
+class MovingAverageHighPass:
+    """x minus its running mean over `n` samples: removes DC and rumble cheaply."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.hist = np.zeros(n - 1, np.float64)
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        buf = np.concatenate([self.hist, x.astype(np.float64)])
+        self.hist = buf[len(buf) - (self.n - 1):]
+        c = np.concatenate([[0.0], np.cumsum(buf)])
+        mean = (c[self.n:] - c[:-self.n]) / self.n  # one value per input sample
+        return (x - mean).astype(np.float32)
 
 
 class DelayLine:
@@ -140,8 +185,7 @@ class Echo(Effect):
     def __init__(self) -> None:
         self.d = int(self.TIME_S * SR)
         self.line = DelayLine(self.d * 2)
-        self.lp = signal.butter(1, 3500, fs=SR, output="sos")
-        self.zi = signal.sosfilt_zi(self.lp) * 0
+        self.lp = FIR(lowpass_taps(3500, 15))  # darkens each repeat
 
     def process(self, x, amount):
         fb = 0.2 + 0.55 * amount
@@ -149,14 +193,14 @@ class Echo(Effect):
         out = np.empty_like(x)
         for i, c in _chunks(x, self.d):
             tap = self.line.read(self.d, len(c))
-            tap_f, self.zi = signal.sosfilt(self.lp, tap, zi=self.zi)
             # stop feeding new input at amount 0, but let the repeats die away
-            self.line.write(c * (amount > 0.01) + fb * tap_f.astype(np.float32))
+            self.line.write(c * (amount > 0.01) + fb * self.lp(tap))
             out[i : i + len(c)] = c + mix * tap
         return out
 
     def reset(self):
         self.line.clear()
+        self.lp.reset()
 
 
 class Reverb(Effect):
@@ -171,8 +215,7 @@ class Reverb(Effect):
         scale = SR / 44100
         self.combs = [(DelayLine(int(d * scale) * 2), int(d * scale)) for d in self.COMBS]
         self.aps = [(DelayLine(int(d * scale) * 2), int(d * scale)) for d in self.ALLPASS]
-        self.damp = signal.butter(1, 5000, fs=SR, output="sos")
-        self.zi = signal.sosfilt_zi(self.damp) * 0
+        self.damp = FIR(lowpass_taps(5000, 15))
 
     def process(self, x, amount):
         # the tank keeps running at amount 0 so the tail rings out instead of cutting
@@ -191,24 +234,24 @@ class Reverb(Effect):
                 line.write(acc + 0.5 * bo)
                 acc = bo - acc
             out[i : i + n] = acc
-        wet, self.zi = signal.sosfilt(self.damp, out, zi=self.zi)
+        wet = self.damp(out)
         mix = min(1.0, amount * 1.5)
-        return x * (1 - 0.35 * mix) + wet.astype(np.float32) * mix * 1.6
+        return x * (1 - 0.35 * mix) + wet * mix * 1.6
 
     def reset(self):
         for line, _ in self.combs + self.aps:
             line.clear()
+        self.damp.reset()
 
 
 class Radio(Effect):
     name, short = "Radio", "RAD"
 
     def __init__(self) -> None:
-        self.sos = signal.butter(2, (450, 2600), btype="bandpass", fs=SR, output="sos")
-        self.zi = signal.sosfilt_zi(self.sos) * 0
+        self.band = FIR(bandpass_taps(450, 2600, 129))
 
     def process(self, x, amount):
-        y, self.zi = signal.sosfilt(self.sos, x, zi=self.zi)
+        y = self.band(x)
         if amount < 0.01:
             return x
         drive = 1 + amount * 25
@@ -233,13 +276,11 @@ class InputConditioner:
     """High-pass (rumble/DC) and a soft noise gate for the mic before the FX."""
 
     def __init__(self) -> None:
-        self.hp = signal.butter(2, 80, btype="highpass", fs=SR, output="sos")
-        self.zi = signal.sosfilt_zi(self.hp) * 0
+        self.hp = MovingAverageHighPass(SR // 180)  # about -3 dB at 80 Hz
         self.gate_gain = 0.0
 
     def process(self, x: np.ndarray, gain: float, gate_db: float) -> np.ndarray:
-        y, self.zi = signal.sosfilt(self.hp, x, zi=self.zi)
-        y = (y * gain).astype(np.float32)
+        y = self.hp(x) * np.float32(gain)
         rms = float(np.sqrt(np.mean(y * y)) + 1e-9)
         # open at once, close over a few blocks; ramp inside the block so it never clicks
         new = 1.0 if 20 * np.log10(rms) > gate_db else self.gate_gain * 0.6

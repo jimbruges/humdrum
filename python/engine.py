@@ -150,14 +150,19 @@ class Engine:
                     log.warning("mic read failed: %s", e)
                     self._mic = None
                     continue
-                if chunk is None:
+                if chunk is None or chunk.size == 0:  # empty reads happen with nothing plugged in
                     time.sleep(0.001)
                     continue
                 x = chunk.reshape(-1).astype(np.float32) / 32768.0
             else:
                 x = np.zeros(block, np.float32)
 
-            y = self._process(x)
+            try:
+                y = self._process(x)
+            except Exception:
+                # never let one bad block kill the audio thread for the rest of the gig
+                log.exception("audio block failed")
+                y = np.zeros(len(x), np.float32)
 
             if self._spk is not None:
                 try:
@@ -269,6 +274,9 @@ class Engine:
         trim, norm = self.s.get("auto_trim", True), self.s.get("normalize", True)
 
         def finish() -> None:
+            if float(np.max(np.abs(audio))) < 1e-3:  # below -60 dBFS: nothing plugged in, or silence
+                log.info("pad %d: recording was silent, pad left unchanged", pad)
+                return
             take = tidy_recording(audio, trim, norm)
             if len(take) < SR * 0.05:
                 log.info("pad %d: recording too short, ignored", pad)

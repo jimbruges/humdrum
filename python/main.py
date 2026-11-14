@@ -26,7 +26,14 @@ import display
 from engine import Engine
 from slots import MAX_PADS, SlotBank, decode_wav
 
-logging.basicConfig(level=logging.INFO)
+try:
+    # the App Lab runtime only prints loggers it has configured itself
+    from arduino.app_utils.logger import configure_library_logger
+
+    configure_library_logger("humdrum", "Humdrum")
+    configure_library_logger("engine", "Engine")
+except ImportError:
+    logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("humdrum")
 
 
@@ -429,6 +436,10 @@ def loop() -> None:
 
     time.sleep(1 / 30)
 
+
+# The MCU reports its modules once, at boot, which can be before this process is
+# listening; ask for a fresh report as soon as the loop runs.
+mcu_calls.put(("rescan",))
 
 engine.start()
 App.run(user_loop=loop)
