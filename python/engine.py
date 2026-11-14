@@ -272,10 +272,16 @@ class Engine:
             return
         audio = np.concatenate(chunks)
         trim, norm = self.s.get("auto_trim", True), self.s.get("normalize", True)
+        floor = self.cond.floor
 
         def finish() -> None:
-            if float(np.max(np.abs(audio))) < 1e-3:  # below -60 dBFS: nothing plugged in, or silence
-                log.info("pad %d: recording was silent, pad left unchanged", pad)
+            # loudest 20 ms window must clear the input's noise floor by 8 dB, otherwise
+            # it's hiss (e.g. nothing plugged in) and normalising it would be deafening
+            w = int(SR * 0.02)
+            usable = len(audio) // w * w
+            loudest = float(np.sqrt((audio[:usable].reshape(-1, w) ** 2).mean(axis=1)).max()) if usable else 0.0
+            if loudest < max(floor * 2.5, 1e-3):
+                log.info("pad %d: nothing above the noise floor was recorded, pad left unchanged", pad)
                 return
             take = tidy_recording(audio, trim, norm)
             if len(take) < SR * 0.05:

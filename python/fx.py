@@ -273,17 +273,27 @@ def make_effects() -> list[Effect]:
 
 
 class InputConditioner:
-    """High-pass (rumble/DC) and a soft noise gate for the mic before the FX."""
+    """High-pass (rumble/DC) and a soft noise gate for the mic before the FX.
+
+    The gate threshold follows the measured noise floor: an open mic input on the
+    Media Carrier hisses at around -33 dBFS with nothing plugged in, far above any
+    fixed threshold that would still let a quiet voice through.
+    """
+
+    FLOOR_RISE = 1.0005  # per block: the floor creeps up ~0.4 dB/s, drops at once
 
     def __init__(self) -> None:
         self.hp = MovingAverageHighPass(SR // 180)  # about -3 dB at 80 Hz
         self.gate_gain = 0.0
+        self.floor = 0.0  # noise floor, linear RMS after gain
 
     def process(self, x: np.ndarray, gain: float, gate_db: float) -> np.ndarray:
         y = self.hp(x) * np.float32(gain)
         rms = float(np.sqrt(np.mean(y * y)) + 1e-9)
+        self.floor = rms if (self.floor == 0.0 or rms < self.floor) else self.floor * self.FLOOR_RISE
+        threshold_db = max(gate_db, 20 * np.log10(self.floor) + 6)
         # open at once, close over a few blocks; ramp inside the block so it never clicks
-        new = 1.0 if 20 * np.log10(rms) > gate_db else self.gate_gain * 0.6
+        new = 1.0 if 20 * np.log10(rms) > threshold_db else self.gate_gain * 0.6
         ramp = np.linspace(self.gate_gain, new, len(y), dtype=np.float32)
         self.gate_gain = new
         return y * ramp

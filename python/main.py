@@ -170,6 +170,7 @@ def on_pad_up(pad: int, held_ms: int = 0) -> None:
 
 
 def on_pad_hold(pad: int) -> None:
+    log.info("pad %d held: recording", int(pad) + 1)
     engine.post("hold", int(pad))
 
 
@@ -179,6 +180,7 @@ def on_knob_turn(delta: int) -> None:
 
 
 def on_knob_click() -> None:
+    log.info("knob click: next effect")
     settings["fx_index"] = (settings["fx_index"] + 1) % len(engine.effects)
     settings["fx_bypass"] = False
     save_settings_soon()
@@ -187,6 +189,7 @@ def on_knob_click() -> None:
 
 def on_knob_long() -> None:
     settings["fx_bypass"] = not settings["fx_bypass"]
+    log.info("knob hold: bypass %s", "on" if settings["fx_bypass"] else "off")
     save_settings_soon()
     push_state()
 
