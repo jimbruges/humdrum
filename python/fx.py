@@ -16,6 +16,8 @@ moving-average high-pass, which vectorise where recursive IIRs can't.
 
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 
 SR = 48000
@@ -280,18 +282,25 @@ class InputConditioner:
     fixed threshold that would still let a quiet voice through.
     """
 
-    FLOOR_RISE = 1.0005  # per block: the floor creeps up ~0.4 dB/s, drops at once
+    FLOOR_BLOCKS = 200  # ~2 s of 512-sample blocks
+    FLOOR_PERCENTILE = 10
+    DIGITAL_SILENCE = 1e-6  # capture start-up and dropouts deliver exact zeros; not the floor
 
     def __init__(self) -> None:
         self.hp = MovingAverageHighPass(SR // 180)  # about -3 dB at 80 Hz
         self.gate_gain = 0.0
         self.floor = 0.0  # noise floor, linear RMS after gain
+        self._levels: deque[float] = deque(maxlen=self.FLOOR_BLOCKS)
 
     def process(self, x: np.ndarray, gain: float, gate_db: float) -> np.ndarray:
         y = self.hp(x) * np.float32(gain)
         rms = float(np.sqrt(np.mean(y * y)) + 1e-9)
-        self.floor = rms if (self.floor == 0.0 or rms < self.floor) else self.floor * self.FLOOR_RISE
-        threshold_db = max(gate_db, 20 * np.log10(self.floor) + 6)
+        # a low percentile over the last few seconds: one dead or quiet block can't drag it down
+        if rms > self.DIGITAL_SILENCE:
+            self._levels.append(rms)
+        if len(self._levels) >= 10:
+            self.floor = float(np.percentile(self._levels, self.FLOOR_PERCENTILE))
+        threshold_db = max(gate_db, 20 * np.log10(self.floor + 1e-12) + 6)
         # open at once, close over a few blocks; ramp inside the block so it never clicks
         new = 1.0 if 20 * np.log10(rms) > threshold_db else self.gate_gain * 0.6
         ramp = np.linspace(self.gate_gain, new, len(y), dtype=np.float32)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import queue
 import time
 from pathlib import Path
@@ -422,6 +423,7 @@ def loop() -> None:
         _last_meter = now
         ui.send_message("meter", {
             "in": round(engine.level_in, 3),
+            "floor_db": round(20 * math.log10(engine.cond.floor + 1e-12), 1),
             "out": round(engine.level_out, 3),
             "fx_index": settings["fx_index"],
             "fx_amount": round(settings["fx_amount"], 3),
