@@ -23,7 +23,7 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 | Arduino UNO Q (2 GB) | 1 | |
 | Arduino UNO Media Carrier (ASX00083) | 1 | Stacks under the UNO Q and provides the audio jacks |
 | Modulino Knob | 1 | Fits any grid slot |
-| Modulino Buttons | 1 to 11 | 3 pads each; use as many as your case has slots |
+| Modulino Buttons | 1 to 15 | 3 pads each; use as many as your case has slots |
 | Modulino Buzzer | 0 or 1 | Optional, tone-only |
 | Modulino Distance | 0 or 1 | Optional; enables the Theremin effect. Peel off the protective film! |
 | Qwiic cables (50–100 mm) | 1 per module | Daisy-chained under the lid through the cable slots |
@@ -122,14 +122,16 @@ The buzzer only plays a frequency for a set time on a piezo, so it can't reprodu
 
 ## Enclosure
 
-The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, exposed button-head screws and an orange accent on the snap standoffs. The electronics strip is always on the right. It carries the LED matrix window, the engraved legend and the QR code. An **FX key** right of the window spells out the matrix's effect codes (UP pitch up, DWN pitch down, ROB robot, BIT bitcrush, ECO echo, VRB reverb, RAD radio, THR theremin). The strip is identical at every case width, so every size has it. The Modulino grid grows to the left in **columns of 3 slots** (48 × 32 mm pitch, holes on the Modulino's 32 × 16 mm pattern). Every slot has Qwiic pass-through slots on both sides, so the cables run hidden under the lid.
+The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, exposed button-head screws and an orange accent on the snap standoffs. The electronics strip is always on the right. It carries the LED matrix window, the engraved legend and the QR code. An **FX key** right of the window spells out the matrix's effect codes (UP pitch up, DWN pitch down, ROB robot, BIT bitcrush, ECO echo, VRB reverb, RAD radio, THR theremin). The strip is identical at every case width, so every size has it. The Modulino grid grows to the left in **columns of 4 slots** (48 × 27.5 mm pitch, so neighbouring modules sit about 2 mm apart; holes on the Modulino's 32 × 16 mm pattern). Every slot has Qwiic pass-through slots on both sides, so the cables run hidden under the lid.
 
 | Columns | Slots | Max pads (knob in one slot) | Case W × D × H | Fits a 256 mm bed? |
 |---|---|---|---|---|
-| 1 | 3 | 6 | **140 × 124 × 36 mm** | ✅ |
-| 2 | 6 | 15 | **188 × 124 × 36 mm** | ✅ |
-| 3 | 9 | 24 | **236 × 124 × 36 mm** | ✅ |
-| 4 | 12 | 33 | **284 × 124 × 36 mm** | ❌ needs ≥ 290 mm (e.g. Prusa XL, Bambu H2D) |
+| 1 | 4 | 9 | **140 × 124 × 29 mm** | ✅ |
+| 2 | 8 | 21 | **188 × 124 × 29 mm** | ✅ |
+| 3 | 12 | 33 | **236 × 124 × 29 mm** | ✅ |
+| 4 | 16 | 45 | **284 × 124 × 29 mm** | ❌ needs ≥ 290 mm (e.g. Prusa XL, Bambu H2D) |
+
+The optional Buzzer and Distance modules each take a slot too, so subtract 3 pads for each one fitted.
 
 Files: `enclosure/<n>col/` has the tray STL, lid STL and STEP. `enclosure/humdrum-snap-standoff.stl` is shared by all widths (print 4 per Modulino). `enclosure/humdrum-enclosure.sc` is the master SolidCraft design: change the `cols` parameter to regenerate.
 
@@ -147,7 +149,7 @@ A power bank up to **93 × 61 × 14 mm** lies on the floor along the rear of the
 - The bay is in the same place at every width (1–4 columns), and checked clash-free against the tray at 1 and 4 columns.
 - The bank sits beside the PCB stack, about 1 mm clear of the Media Carrier's inward-facing jack.
 - The bank's port end stops about 11 mm inside the wall, so normal plugs reach; very short stubby adapters may not.
-- To make room for the bank, the rear-middle lid screw sits at x = 28 mm, and the rear-right screw takes the place of the front-right one (the board now fills that corner).
+- To make room for the bank, the rear-middle lid screw sits at x = 28 mm, and the rear-right screw takes the place of the front-right one (the board now fills that corner). The two middle screws sit 4.5 mm from the front and rear edges so their heads clear the outer Modulino rows.
 - Check that your bank can supply the UNO Q (5 V, up to 3 A at peak). Some banks switch off at low current draw.
 
 ### Qwiic clearance
@@ -165,7 +167,7 @@ The UNO Q's Qwiic connector (QWIIC1) is on the board edge that faces the Modulin
 
 ### Colouring the embossed QR
 
-The QR's dark modules stand 0.8 mm up from a recessed 42 × 42 mm field and finish **flush with the lid top**. Swipe a Sharpie or paint marker across the tops: the recessed quiet zone and gaps stay light. For a cleaner result, put a **filament change at Z = 35.2 mm** (lid printed top up). The modules then print dark, along with the top 0.8 mm of the lid, while the recessed field stays light, so the code still scans.
+The QR's dark modules stand 0.8 mm up from a recessed 42 × 42 mm field and finish **flush with the lid top**. Swipe a Sharpie or paint marker across the tops: the recessed quiet zone and gaps stay light. For a cleaner result, put a **filament change at Z = 2.2 mm** (lid printed top up). The modules then print dark, along with the top 0.8 mm of the lid, while the recessed field stays light, so the code still scans.
 
 The QR is a standard `WIFI:` code (v3-M, 29 × 29 modules at 1.25 mm) for the hotspot's SSID and password.
 
@@ -186,8 +188,9 @@ The published lid files carry a **public demo** network: SSID `HUMDRUM`, passwor
 Positions come from the UNO Q and Media Carrier datasheet drawings. The board sits in the front-right corner, rotated 180° from the usual UNO orientation (USB-C to the right wall, digital header and jacks to the front):
 
 - **USB-C** cut-out: right wall, 14 × 7.5 mm, spanning 9.2–23.2 mm back from the board's front edge, 1.5 mm above the UNO Q's top surface.
-- **Jacks**: two Ø8 mm holes in the front wall, at 19.3 and 34.3 mm from the board's left edge, 17.3 mm above the floor's underside. Measured off the datasheet drawing; the edge was confirmed on a real Media Carrier.
+- **Jacks**: two Ø8 mm holes in the front wall, at 19.3 and 34.3 mm from the board's left edge, centred 10.3 mm above the case bottom. Measured off the datasheet drawing; the edge was confirmed on a real Media Carrier.
 - **Stack height**: assumes a 7.6 mm gap from carrier to UNO Q, putting the top of the UNO Q headers 0.5 mm under the lid. **This is the one number not stated in the datasheets.** If your stack is taller, raise `Ht`; if shorter, the jacks and USB-C sit a little high in their holes.
+- **Carrier posts**: 3.84 mm tall, leaving 3.84 mm under the Media Carrier for solder tails. The `lift` parameter (7 mm) raises the tray floor; lower it if anything on the carrier's underside needs more room (each 1 mm of `lift` removed adds 1 mm to the case height).
 - **LED matrix window**: 30 × 17 mm, over the matrix at its datasheet position.
 
 Print the tray once in draft quality to check the jacks and USB-C before printing the final parts.
