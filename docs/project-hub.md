@@ -50,7 +50,7 @@ about [CHECK: print time] for the tray and lid)
 | 1 per module | Qwiic cables, 50–100 mm |
 | 6 | M3 heat-set inserts (M3 × 5.7, Ø4.0 hole) |
 | 6 | M3 × 6 button-head screws, for the lid |
-| 4 | M3 × 6 thread-forming screws, for the Media Carrier |
+| — | Hot glue, to hold the Media Carrier in its cradles |
 | 1 | Clear or smoked acrylic, 33.6 × 20.6 × 1.5 mm, for the LED matrix window |
 | 4 | Rubber feet, Ø12 mm |
 | 1 | 3.5 mm TRS cable to a balanced mixer input (the line out is mono differential) |
@@ -213,10 +213,10 @@ left in columns of four slots.
 
 | Columns | Slots | Max pads (knob in one slot) | Size |
 |---|---|---|---|
-| 1 | 4 | 9 | 140 × 124 × 29 mm |
-| 2 | 8 | 21 | 188 × 124 × 29 mm |
-| 3 | 12 | 33 | 236 × 124 × 29 mm |
-| 4 | 16 | 45 | 284 × 124 × 29 mm |
+| 1 | 4 | 9 | 140 × 124 × 31 mm |
+| 2 | 8 | 21 | 188 × 124 × 31 mm |
+| 3 | 12 | 33 | 236 × 124 × 31 mm |
+| 4 | 16 | 45 | 284 × 124 × 31 mm |
 
 A Buzzer or Distance module takes a slot too, so subtract three pads for each one.
 
@@ -249,14 +249,18 @@ needs to go into the repository.
 
 ### Assembly
 
-[PHOTO: inside the tray with the UNO Q and Media Carrier on their posts, and the power bank in its bay]
+[PHOTO: inside the tray with the UNO Q and Media Carrier in their cradles, and the power bank in its bay]
+
+![The UNO Q and Media Carrier in the tray, from Arduino's 3D models](../enclosure/renders/render-boards-in-place.png)
 
 ![Inside the tray: UNO Q front right, power bank rear right](../enclosure/renders/render-layout.png)
 
 1. **Inserts.** Press the six M3 heat-set inserts into the tray's corner bosses.
-2. **Board.** Stack the UNO Q on the Media Carrier and screw the carrier onto the
-   four posts in the front-right corner, so the two jacks line up with the holes in
-   the front wall and the USB-C with the slot in the right wall.
+2. **Board.** Plug the UNO Q onto the Media Carrier's JMEDIA headers. The carrier
+   has no mounting holes, so instead lower its two bottom sockets into the U-shaped
+   cradles in the front-right corner. The jacks then line up with the holes in the
+   front wall and the USB-C with the slot in the right wall. A dab of hot glue in
+   each cradle stops it moving.
 3. **Power bank (optional).** Lay it along the rear wall with its ports facing the
    right wall, held by the printed ribs and a strip of hook-and-loop tape. A short
    USB-C cable loops outside the case from the bank to the UNO Q. Without it, the
