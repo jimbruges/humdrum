@@ -57,7 +57,7 @@ about [CHECK: print time] for the tray and lid)
 | 1 | Electret or headset mic on a 3.5 mm TRRS (CTIA) plug |
 | 0–1 | 5000 mAh power bank, up to 93 × 61 × 14 mm, ports on a short end (optional) |
 | 0–1 | Short USB-C cable, bank to UNO Q (optional) |
-| 4 per Modulino | 3D-printed snap standoffs |
+| 4 per Modulino | M3 × 6 self-tapping (thread-forming) screws |
 
 ## Tools
 
@@ -206,7 +206,7 @@ recognise it as a portal.
 ![The 4-column case](../enclosure/renders/render-4col.png)
 
 The case is a flat, Teenage Engineering–style slab: a dark tray, a light lid, visible
-button-head screws, and orange snap standoffs for the Modulinos. The electronics strip
+button-head screws, and Modulinos screwed flat onto the lid. The electronics strip
 on the right holds the LED matrix window, the QR code, an engraved legend for the
 controls, and a key to the effect codes on the matrix. The Modulino grid grows to the
 left in columns of four slots.
@@ -223,15 +223,13 @@ A Buzzer or Distance module takes a slot too, so subtract three pads for each on
 ![The electronics strip: QR code, legend, LED matrix window and FX key](../enclosure/renders/render-strip-closeup.png)
 
 All the print files are in the repository's `enclosure/` folder: tray and lid STLs
-and a STEP for each width, the snap standoff, and the parametric SolidCraft design.
+and a STEP for each width, and the parametric SolidCraft design.
 
 - **Tray:** open side up, no supports. PETG or ABS/ASA is best; PLA is fine out of
   the sun.
 - **Lid:** top face up, so the QR code and engraving come out crisp.
-- **Snap standoffs:** upright, at 0.12–0.16 mm layers, in PETG for springiness. Print
-  four per Modulino.
 
-[PHOTO: printed tray and lid, plus a row of orange snap standoffs]
+[PHOTO: the printed tray and lid]
 
 ### Colouring the QR code
 
@@ -266,8 +264,9 @@ needs to go into the repository.
    USB-C cable loops outside the case from the bank to the UNO Q. Without it, the
    unit runs from any USB-C supply.
 4. **Window.** Glue the acrylic into the rebate above the LED matrix.
-5. **Standoffs.** Click four snap standoffs into the lid for each Modulino, then press
-   the Modulinos onto them.
+5. **Modulinos.** Screw each Modulino flat onto the lid with four M3 × 6 self-tapping
+   screws. They cut their own thread in the lid's Ø2.6 mm pilot holes, so don't
+   overtighten them.
 6. **Cables.** Daisy-chain the Modulinos with Qwiic cables through the slots in the
    lid, and run the first one down through the pass-through next to the matrix window
    to the UNO Q's Qwiic connector.

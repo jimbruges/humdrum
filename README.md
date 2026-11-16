@@ -29,6 +29,7 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 | Qwiic cables (50–100 mm) | 1 per module | Daisy-chained under the lid through the cable slots |
 | M3 heat-set inserts (M3 × 5.7, Ø4.0 hole) | 6 | Tray bosses |
 | M3 × 6 button-head screws | 6 | Lid; meant to be visible |
+| M3 × 6 self-tapping (thread-forming) screws | 4 per Modulino | Hold each Modulino flat on the lid |
 | Hot glue | a little | Holds the Media Carrier's bottom sockets in their cradles |
 | Clear or smoked acrylic, 33.6 × 20.6 × 1.5 mm | 1 | LED matrix window, glued into the rebate |
 | Rubber feet, Ø12 × 1+ mm | 4 | Recesses in the tray |
@@ -41,7 +42,17 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 
 The carrier has three 3.5 mm jacks: **Line Out** (mono, balanced), **Mic In / Headphones** (TRRS combo) and **Ear Out**. Two of them, on the UNO Q's digital-header edge, point out of the case's **front wall**. The third faces into the case and isn't used.
 
-> ⚠️ The datasheet doesn't say which physical jack is which. Plug in and check, then label the front wall to match. If the line out turns out to be the inward-facing jack, use a short 3.5 mm extension.
+> ⚠️ The datasheet doesn't say which physical jack is which. In the web UI, settings → *audio in / out* → **identify jacks** plays each jack on its own (1 beep = headphones/combo jack, 2 = line out, 3 = ear out) and shows which one is playing, so you can label the front wall to match. If the line out turns out to be the inward-facing jack, use a short 3.5 mm extension.
+
+**The audio settings** (settings → *audio in / out*):
+
+- **Mic input**: the Media Carrier's combo-jack mic, or a USB mic if one is plugged in. The *mic* meter under it shows the raw input level, and the line below says in plain words what's wrong if the input is silent or so noisy that the noise gate is muting it.
+- **Output**: the Media Carrier, or a USB audio device. With the Media Carrier, tick which jacks play: **headphones** (the combo jack), **line out** and **ear out**, in any combination. They all carry the same mono mix.
+- **Test tone** plays a short beep on the ticked jacks at a fixed level (about −12 dBFS), whatever the master and sample levels are set to.
+
+How it works: the app keeps the sound card on PipeWire's *Headphones* profile, which is the only one that routes the mic. Line out and ear out are switched on alongside it with the codec switches from Arduino's [Media Carrier user manual](https://docs.arduino.cc/tutorials/uno-media-carrier/user-manual/). The headphone path itself has to stay powered while audio is streaming (switching it off stalls the sound card), so unticking *headphones* mutes the combo jack's amplifier instead. The mic's capture gain is set to the manual's recording values (`ADC2 Volume` 5, `TX_DEC0 Volume` 100); PipeWire otherwise leaves the digital gain at +40 dB.
+
+**Mic plugs.** The mic input is on the combo jack, which follows the phone-headset (CTIA) layout: tip and ring are the **headphone outputs**, the sleeve is the mic. A 3-pole TRS mic plug puts its mic wire on a headphone output, so the mic capsule plays the output back at you, and it records nothing but hum. Use a TRS-to-TRRS (CTIA) mic adapter. Until then, untick *headphones* so the combo jack stays quiet.
 
 ---
 
@@ -107,7 +118,7 @@ The buzzer only plays a frequency for a set time on a piezo, so it can't reprodu
 ## Deploying
 
 1. **App.** Copy `humdrum/` into App Lab (or onto the board under `~/ArduinoApps/`) and run it. App Lab builds the sketch. The Python side needs only numpy, which the App Lab image already has.
-2. **Audio devices.** The defaults are `jack:1` in and `jack:1` out. If you hear nothing, open the web UI → settings and try `jack:2` / `jack:3`, or an ALSA name (`plughw:CARD=…,DEV=…`). *System → reopen audio* applies the change. The current status appears under *system*.
+2. **Audio devices.** The defaults are the Media Carrier's mic and all three of its jacks. Change them in the web UI under settings → *audio in / out* (see *The audio settings* above). *System* shows whether the devices are open, how many audio blocks have run, and the last audio error.
 3. **Hotspot + captive portal.** On the board (over SSH or `adb shell`):
    ```bash
    cd humdrum/host/portal && sudo ./install.sh
@@ -121,7 +132,7 @@ The buzzer only plays a frequency for a set time on a piezo, so it can't reprodu
 
 ## Enclosure
 
-The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, exposed button-head screws and an orange accent on the snap standoffs. The electronics strip is always on the right. It carries the LED matrix window, the engraved legend and the QR code. An **FX key** right of the window spells out the matrix's effect codes (UP pitch up, DWN pitch down, ROB robot, BIT bitcrush, ECO echo, VRB reverb, RAD radio, THR theremin). The strip is identical at every case width, so every size has it. The Modulino grid grows to the left in **columns of 4 slots** (48 × 27.5 mm pitch, so neighbouring modules sit about 2 mm apart; holes on the Modulino's 32 × 16 mm pattern). Every slot has Qwiic pass-through slots on both sides, so the cables run hidden under the lid.
+The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, and exposed button-head screws. The electronics strip is always on the right. It carries the LED matrix window, the engraved legend and the QR code. An **FX key** right of the window spells out the matrix's effect codes (UP pitch up, DWN pitch down, ROB robot, BIT bitcrush, ECO echo, VRB reverb, RAD radio, THR theremin). The strip is identical at every case width, so every size has it. The Modulino grid grows to the left in **columns of 4 slots** (48 × 27.5 mm pitch, so neighbouring modules sit about 2 mm apart; Ø2.6 mm pilot holes on the Modulino's 32 × 16 mm pattern). Every slot has Qwiic pass-through slots on both sides, so the cables run hidden under the lid.
 
 | Columns | Slots | Max pads (knob in one slot) | Case W × D × H | Fits a 256 mm bed? |
 |---|---|---|---|---|
@@ -132,7 +143,7 @@ The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, ex
 
 The optional Buzzer and Distance modules each take a slot too, so subtract 3 pads for each one fitted.
 
-Files: `enclosure/<n>col/` has the tray STL, lid STL and STEP. `enclosure/humdrum-snap-standoff.stl` is shared by all widths (print 4 per Modulino). `enclosure/humdrum-enclosure.sc` is the master SolidCraft design: change the `cols` parameter to regenerate.
+Files: `enclosure/<n>col/` has the tray STL, lid STL and STEP. `enclosure/humdrum-enclosure.sc` is the master SolidCraft design: change the `cols` parameter to regenerate.
 
 ### Right wall: USB-C and battery ports
 
@@ -172,7 +183,7 @@ The renders use Arduino's 3D models (UNO Q `ABX00162-step.zip`, Media Carrier `A
 
 - **Tray**: print open side up, no supports. PETG or ABS/ASA preferred; PLA is fine if the case stays out of the sun.
 - **Lid**: print **top face up** so the QR modules and engraving come out crisp. Holes and slots are vertical, so no supports needed.
-- **Snap standoffs**: upright, 0.12–0.16 mm layers, PETG for springiness. They click into the lid from above; the Modulino's Ø3.2 holes click onto the top pins.
+- **Modulino mounting**: each Modulino sits flat on the lid and is held by four M3 × 6 self-tapping screws through its Ø3.2 holes into Ø2.6 mm pilot holes in the lid. The screws cut their own thread in the 3 mm lid; their tips poke about 1.4 mm out underneath, clear of everything in the tray. Don't overtighten: printed threads strip easily.
 
 ### Colouring the embossed QR
 
