@@ -62,6 +62,29 @@
     <section class="panel settings">
       <div class="panel-head"><h2><span class="num">03</span> settings</h2></div>
       <div class="grid-settings" id="settings"></div>
+      <div class="audio-io">
+        <h3>audio in / out</h3>
+
+        <label class="setting device"><span>mic input</span><select id="dev-in"></select></label>
+        <div class="meter"><span>mic</span><i id="m-raw"></i></div>
+        <p class="help" id="in-help">The level the mic delivers, before gain and the noise gate.</p>
+
+        <label class="setting device"><span>output</span><select id="dev-out"></select></label>
+        <div id="ports-wrap">
+          <p class="help">Which Media Carrier jacks play. Tick as many as you like; they all get the same mix.</p>
+          <div class="ports" id="ports"></div>
+        </div>
+
+        <div class="sys-row">
+          <button id="tone" class="chip">test tone</button>
+          <button id="identify" class="chip">identify jacks</button>
+          <button id="refresh-devices" class="chip">refresh list</button>
+        </div>
+        <p class="help" id="test-status"><b>test tone</b> plays a short beep on the ticked jacks, at a fixed level.
+          <b>identify jacks</b> plays each jack on its own: 1 beep headphones, 2 line out, 3 ear out.</p>
+        <p class="help">The mic goes in the <b>headphones (combo) jack</b> and needs a 4-pole phone-headset (TRRS, CTIA) plug.
+          A 3-pole TRS mic won't record there: its plug connects the mic to the headphone output instead. Use a TRS-to-TRRS mic adapter.</p>
+      </div>
       <details class="system">
         <summary>system</summary>
         <div class="sys-row">

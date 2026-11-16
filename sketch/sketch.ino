@@ -53,6 +53,10 @@ static const uint32_t POLL_INTERVAL_MS = 4;
 static const uint32_t KNOB_REPORT_MS = 15;
 static const uint32_t KNOB_LONG_MS = 700;
 static const uint32_t DEBOUNCE_MS = 12;
+// The knob's switch must read the same this many polls in a row (~12 ms) to count
+static const uint8_t KNOB_STABLE_READS = 3;
+// More detent steps than this in one 4 ms poll can only be a corrupted read
+static const int16_t KNOB_MAX_STEP = 40;
 static const uint32_t TOF_POLL_MS = 10;
 static const uint32_t TOF_REPORT_MIN_MS = 25;   // at most ~40 updates/s over the Bridge
 static const uint32_t TOF_REPORT_MAX_MS = 250;  // and at least 4/s so Linux knows it's alive
@@ -92,8 +96,11 @@ uint32_t lastTofReport = 0;
 int16_t knobLast = 0;
 int32_t knobAccum = 0;
 bool knobDown = false;
+bool knobRawLast = false;
+uint8_t knobRawRun = 0;
 uint32_t knobDownAt = 0;
 bool knobLongSent = false;
+uint32_t badReads = 0;  // Modulino reads rejected as corrupted
 
 uint8_t padStates[MAX_PADS];
 uint32_t holdMs = 600;
@@ -355,11 +362,26 @@ void reportTopology() {
 // Input
 // ---------------------------------------------------------------------------
 
+// A read is only trusted if the module answers with its own pinstrap byte and
+// the payload makes sense. A glitched transfer (e.g. all 0xFF) would otherwise
+// look like a press, and a phantom knob click changes the effect.
+bool buttonsReadOk(uint8_t pin, const uint8_t* b) {
+  return pin == PINSTRAP_BUTTONS && b[0] <= 1 && b[1] <= 1 && b[2] <= 1;
+}
+
+bool knobReadOk(uint8_t pin, const uint8_t* b) {
+  return (pin == PINSTRAP_KNOB_A || pin == PINSTRAP_KNOB_B) && b[2] <= 1;
+}
+
 void pollButtons(uint32_t now) {
   for (int mi = 0; mi < moduleCount; mi++) {
     ButtonsModule& m = modules[mi];
-    uint8_t b[3];
-    if (!modRead(m.addr, b, 3)) continue;
+    uint8_t b[3], pin = 0;
+    if (!modRead(m.addr, b, 3, &pin)) continue;
+    if (!buttonsReadOk(pin, b)) {
+      badReads++;
+      continue;
+    }
     for (int k = 0; k < PADS_PER_MODULE; k++) {
       int pad = mi * PADS_PER_MODULE + k;
       bool pressed = b[k] != 0;
@@ -384,13 +406,29 @@ void pollButtons(uint32_t now) {
 
 void pollKnob(uint32_t now) {
   if (!knobAddr) return;
-  uint8_t b[3];
-  if (!modRead(knobAddr, b, 3)) return;
+  uint8_t b[3], pin = 0;
+  if (!modRead(knobAddr, b, 3, &pin)) return;
+  if (!knobReadOk(pin, b)) {
+    badReads++;
+    return;
+  }
   int16_t pos = (int16_t)(b[0] | (b[1] << 8));
-  bool pressed = b[2] != 0;
-
-  knobAccum += (int16_t)(pos - knobLast);  // int16 wrap-safe
+  int16_t step = (int16_t)(pos - knobLast);  // int16 wrap-safe
+  if (abs(step) > KNOB_MAX_STEP) {
+    badReads++;
+    return;
+  }
+  knobAccum += step;
   knobLast = pos;
+
+  bool raw = b[2] != 0;
+  if (raw == knobRawLast) {
+    if (knobRawRun < 255) knobRawRun++;
+  } else {
+    knobRawLast = raw;
+    knobRawRun = 1;
+  }
+  bool pressed = knobRawRun >= KNOB_STABLE_READS ? raw : knobDown;
   if (knobAccum != 0 && now - lastKnobReport >= KNOB_REPORT_MS) {
     Bridge.notify("knob_turn", (int)knobAccum);
     knobAccum = 0;
@@ -515,6 +553,11 @@ void loop() {
   if (lastScan == 0 || now - lastScan >= SCAN_INTERVAL_MS) {
     lastScan = now ? now : 1;
     scanBus();
+    static uint32_t badReported = 0;
+    if (badReads != badReported) {
+      badReported = badReads;
+      Bridge.notify("bad_reads", (int)badReads);
+    }
   }
   if (topologyDirty) {
     topologyDirty = false;

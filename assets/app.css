@@ -151,7 +151,10 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .setting { display: grid; grid-template-columns: 1fr 1.3fr 48px; gap: 10px; align-items: center; font-size: 12px; }
 .setting > span { color: var(--ink-2); font: 11px var(--mono); text-transform: uppercase; }
 .setting.toggle { grid-template-columns: 1fr auto; }
-.setting.text { grid-template-columns: 1fr 1.6fr; }
+.setting.text, .setting.device { grid-template-columns: 1fr 1.6fr; }
+.audio-io { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 10px; }
+.audio-io h3 { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; margin: 0 0 6px; }
+.ports { display: grid; gap: 8px; margin-bottom: 4px; }
 .setting input[type=text], .setting select, .ed-move select {
   background: var(--pad); border: 1px solid var(--line); border-radius: 4px; padding: 5px 6px; min-width: 0;
 }

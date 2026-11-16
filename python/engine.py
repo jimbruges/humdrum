@@ -15,10 +15,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
+import audio_ports
 from fx import SR, InputConditioner, make_effects
 from slots import MAX_PADS, SlotBank, tidy_recording
 
 log = logging.getLogger("engine")
+MIC_WAIT_S = 0.05    # an empty mic read this long: keep the output going with silence
+MIC_REOPEN_S = 0.5   # this long with no mic data at all: reopen the mic
+TONE_LEVEL = 0.25    # test tones play at about -12 dBFS whatever the mix levels are
 
 
 @dataclass
@@ -53,6 +57,11 @@ class Engine:
         self.rec_progress = 0.0
         self.recent_out = np.zeros(2048, np.float32)  # for the buzzer pitch tracker
         self.device_status = {"input": "closed", "output": "closed"}
+        self.stats = {"blocks": 0, "mic_reopens": 0, "last_error": ""}
+        self.level_raw = 0.0  # mic before gain and gate, to show the input is alive
+        self.tone_buf: np.ndarray | None = None
+        self.tone_pos = 0
+        self._mic_ok_at = 0.0
         self.on_recorded = None  # callback(pad), runs on a worker thread
 
         self._mic = None
@@ -92,12 +101,17 @@ class Engine:
 
     def _open(self) -> None:
         block = int(self.s.get("block", 512))
+        carrier = audio_ports.is_carrier(str(self.s.get("output_device", ""))) or audio_ports.is_carrier(str(self.s.get("input_device", "")))
+        if carrier:
+            audio_ports.ensure_carrier_profile()
         try:
             from arduino.app_peripherals.speaker import Speaker
 
             self._spk = Speaker(self.s.get("output_device", Speaker.JACK_SPEAKER_1), sample_rate=SR, channels=1, format=np.int16, buffer_size=block)
             self._spk.start()
             self.device_status["output"] = "open"
+            if audio_ports.is_carrier(str(self.s.get("output_device", ""))):
+                audio_ports.apply_ports(list(self.s.get("carrier_outputs", [])))
         except Exception as e:
             log.warning("output device: %s", e)
             self._spk = None
@@ -108,6 +122,8 @@ class Engine:
             self._mic = Microphone(self.s.get("input_device", Microphone.JACK_MIC_1), sample_rate=SR, channels=1, format=np.int16, buffer_size=block)
             self._mic.start()
             self.device_status["input"] = "open"
+            if audio_ports.is_carrier(str(self.s.get("input_device", ""))):
+                audio_ports.set_mic_gain()
         except Exception as e:
             log.warning("input device: %s", e)
             self._mic = None
@@ -136,6 +152,7 @@ class Engine:
                 last_try = time.monotonic()
                 self._close()
                 self._open()
+                self._mic_ok_at = time.monotonic()
                 if self._spk:
                     # a little pre-roll so the first blocks don't underrun
                     silence = np.zeros(int(self.s.get("block", 512)) * 2, np.int16)
@@ -148,21 +165,43 @@ class Engine:
                     chunk = self._mic.capture()
                 except Exception as e:
                     log.warning("mic read failed: %s", e)
+                    self.stats["last_error"] = f"mic: {e}"
                     self._mic = None
                     continue
-                if chunk is None or chunk.size == 0:  # empty reads happen with nothing plugged in
+                now = time.monotonic()
+                if chunk is not None and chunk.size:
+                    self._mic_ok_at = now
+                    x = chunk.reshape(-1).astype(np.float32) / 32768.0
+                elif now - self._mic_ok_at < MIC_WAIT_S:
                     time.sleep(0.001)
                     continue
-                x = chunk.reshape(-1).astype(np.float32) / 32768.0
+                else:
+                    # The mic has gone quiet (an overrun it never recovers from, a
+                    # dropout...). Don't let that freeze the pads and the output:
+                    # play on with silence and reopen the mic.
+                    x = np.zeros(block, np.float32)
+                    if now - self._mic_ok_at > MIC_REOPEN_S:
+                        log.warning("mic delivered nothing for %.1f s, reopening it", now - self._mic_ok_at)
+                        self.stats["mic_reopens"] += 1
+                        self.stats["last_error"] = "mic stalled, reopened"
+                        try:
+                            self._mic.stop()
+                        except Exception:
+                            pass
+                        self._mic = None
+                        self.device_status["input"] = "reopening"
+                        last_try = 0.0
             else:
                 x = np.zeros(block, np.float32)
 
             try:
                 y = self._process(x)
-            except Exception:
+            except Exception as e:
                 # never let one bad block kill the audio thread for the rest of the gig
                 log.exception("audio block failed")
+                self.stats["last_error"] = f"block: {e}"
                 y = np.zeros(len(x), np.float32)
+            self.stats["blocks"] += 1
 
             if self._spk is not None:
                 try:
@@ -197,6 +236,13 @@ class Engine:
         mix = self._render_voices(len(x)) * s.get("sample_level", 0.9)
         out = wet * s.get("monitor_level", 0.8) + mix
         out = np.tanh(out * s.get("master", 0.9)).astype(np.float32)  # soft clip, never wraps
+        if self.tone_buf is not None:
+            seg = self.tone_buf[self.tone_pos : self.tone_pos + len(out)]
+            out[: len(seg)] += seg
+            self.tone_pos += len(out)
+            if self.tone_pos >= len(self.tone_buf):
+                self.tone_buf = None
+        self.level_raw = max(float(np.max(np.abs(x))) if len(x) else 0.0, self.level_raw * 0.85)
 
         n = min(len(out), len(self.recent_out))
         self.recent_out = np.concatenate([self.recent_out[n:], out[-n:]])
@@ -221,9 +267,20 @@ class Engine:
                 self.voices.clear()
             elif kind == "slot_changed":
                 self._slot_changed(ev[1])
+            elif kind == "tone":
+                self._tone(*ev[1:])
             elif kind == "reset_fx":
                 for fx in self.effects:
                     fx.reset()
+
+    def _tone(self, freq: float = 440.0, beeps: int = 1) -> None:
+        """`beeps` short beeps at `freq`: lets you tell the outputs apart by ear."""
+        beep, gap = int(0.18 * SR), int(0.12 * SR)
+        t = np.arange(beep) / SR
+        env = np.minimum(1.0, np.minimum(t, t[::-1]) / 0.01)  # 10 ms ramps, no clicks
+        one = (TONE_LEVEL * np.sin(2 * np.pi * freq * t) * env).astype(np.float32)
+        self.tone_buf = np.concatenate([np.concatenate([one, np.zeros(gap, np.float32)]) for _ in range(max(1, int(beeps)))])
+        self.tone_pos = 0
 
     def _pad_down(self, pad: int) -> None:
         buf = self.bank.play_buffer(pad)

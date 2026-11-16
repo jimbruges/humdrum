@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import queue
+import threading
 import time
 from pathlib import Path
 from urllib.parse import unquote
@@ -22,6 +23,7 @@ from fastapi.responses import JSONResponse, Response
 from arduino.app_bricks.web_ui import WebUI
 from arduino.app_utils import App, Bridge
 
+import audio_ports
 import buzzer
 import display
 from engine import Engine
@@ -75,6 +77,7 @@ DEFAULTS = {
     "block": 512,
     "input_device": "jack:1",
     "output_device": "jack:1",
+    "carrier_outputs": ["headphones", "lineout", "earphone"],  # Media Carrier jacks that play
 }
 # what the web UI may change, with (min, max) for numbers
 LIMITS = {
@@ -103,7 +106,7 @@ bank = SlotBank(DATA)
 engine = Engine(settings, bank)
 ui = WebUI()
 
-topology = {"modules": 0, "knob": False, "addrs": "", "buzzer": False, "distance": False}
+topology = {"modules": 0, "knob": False, "addrs": "", "buzzer": False, "distance": False, "bad_reads": 0}
 THEREMIN = next(i for i, fx in enumerate(engine.effects) if isinstance(fx, Theremin))
 hand_mm = -1  # latest Modulino Distance reading, -1 = nothing in range
 follower = buzzer.BuzzerFollower()
@@ -140,6 +143,8 @@ def apply_settings(changes: dict) -> dict:
             v = type(default)(v)
             lo, hi = LIMITS.get(k, (v, v))
             v = min(max(v, lo), hi)
+        elif isinstance(default, list):
+            v = [p for p in audio_ports.PORTS if p in (v or [])]  # known ports, fixed order
         elif k == "buzzer_mode":
             v = v if v in buzzer.MODES else "off"
             if v == "off":
@@ -151,6 +156,8 @@ def apply_settings(changes: dict) -> dict:
             reopen |= k in DEVICE_KEYS
             if k == "hold_ms":
                 mcu_calls.put(("set_hold_ms", int(v)))
+            if k == "carrier_outputs" and audio_ports.is_carrier(settings["output_device"]):
+                audio_ports.apply_ports(v)
     ensure_fx_available()
     if reopen:
         engine.reopen_devices()
@@ -239,6 +246,13 @@ def on_hand(mm: int) -> None:
     engine.effects[THEREMIN].hand = hand_closeness(hand_mm)
 
 
+def on_bad_reads(count: int) -> None:
+    # corrupted Modulino reads the sketch threw away; a steady climb means a flaky Qwiic cable
+    topology["bad_reads"] = int(count)
+    log.warning("Qwiic bus: %d corrupted Modulino reads rejected so far", int(count))
+
+
+Bridge.provide("bad_reads", on_bad_reads)
 Bridge.provide("knob_long", on_knob_long)
 Bridge.provide("hand", on_hand)
 
@@ -258,6 +272,7 @@ def full_state() -> dict:
         "pads_connected": n,
         "slots": [bank.describe(p) for p in range(MAX_PADS) if p < n or bank.slots[p].loaded],
         "devices": engine.device_status,
+        "audio": {"carrier": audio_ports.is_carrier(settings["output_device"]), **engine.stats},
         "version": bank.version,
     }
 
@@ -375,6 +390,60 @@ async def api_system(action: str):
     return {"ok": True}
 
 
+async def api_audio_devices():
+    return audio_ports.list_devices()
+
+
+async def api_audio_tone(request: Request):
+    body = await request.json()
+    engine.post("tone", float(body.get("freq", 440)), int(body.get("beeps", 1)))
+    return {"ok": True}
+
+
+IDENTIFY_TONES = [(440.0, 1), (660.0, 2), (880.0, 3)]  # one per port, in PORTS order
+_identifying = threading.Lock()
+
+
+async def api_audio_identify():
+    """Beep out of each carrier jack in turn: 1 beep, 2 beeps, 3 beeps."""
+    if not audio_ports.is_carrier(settings["output_device"]):
+        return JSONResponse({"error": "output isn't the Media Carrier"}, status_code=400)
+    if not _identifying.acquire(blocking=False):
+        return {"ok": True}
+
+    def run() -> None:
+        try:
+            for port, (freq, beeps) in zip(audio_ports.PORTS, IDENTIFY_TONES):
+                audio_ports.apply_ports([port])
+                ui.send_message("audio_test", {"port": port, "label": audio_ports.PORTS[port], "beeps": beeps})
+                engine.post("tone", freq, beeps)
+                time.sleep(0.3 * beeps + 1.0)
+        finally:
+            audio_ports.apply_ports(settings["carrier_outputs"])
+            ui.send_message("audio_test", {"done": True})
+            _identifying.release()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True, "order": [{"port": p, "beeps": b} for p, (_, b) in zip(audio_ports.PORTS, IDENTIFY_TONES)]}
+
+
+async def api_audio_debug():
+    """Where the audio thread is right now: for diagnosing stalls."""
+    import sys
+    import traceback
+
+    frames = sys._current_frames()
+    out = {}
+    for t in threading.enumerate():
+        if t.name == "audio" and t.ident in frames:
+            out["audio"] = traceback.format_stack(frames[t.ident])[-8:]
+    return {"stats": engine.stats, "devices": engine.device_status, **out}
+
+
+ui.expose_api("GET", "/api/audio/debug", api_audio_debug)
+ui.expose_api("GET", "/api/audio/devices", api_audio_devices)
+ui.expose_api("POST", "/api/audio/tone", api_audio_tone)
+ui.expose_api("POST", "/api/audio/identify", api_audio_identify)
 ui.expose_api("GET", "/api/state", api_state)
 ui.expose_api("POST", "/api/settings", api_settings)
 ui.expose_api("POST", "/api/slots/swap", api_swap)
@@ -404,6 +473,7 @@ _last_states_at = 0.0
 _last_frame = b""
 _last_meter = 0.0
 _wave: tuple[int, float, float] | None = None  # (pad, progress, show until)
+_blocks_seen = (0, 0.0)  # (engine block count, when it last changed): audio watchdog
 WAVE_HOLD_S = 0.25  # keep the waveform up briefly after the sound ends
 
 
@@ -461,10 +531,26 @@ def loop() -> None:
         except Exception as e:
             log.debug("draw failed: %s", e)
 
+    # The audio thread blocks inside the speaker write if the sound card stops
+    # taking data; say so in the UI rather than going silent without a word.
+    global _blocks_seen
+    blocks = engine.stats["blocks"]
+    if blocks != _blocks_seen[0]:
+        if engine.stats.get("stalled"):
+            engine.stats["stalled"] = False
+            push_state()
+        _blocks_seen = (blocks, now)
+    elif now - _blocks_seen[1] > 2 and engine.device_status.get("output") == "open" and not engine.stats.get("stalled"):
+        engine.stats["stalled"] = True
+        engine.stats["last_error"] = "audio stopped: the sound card isn't taking data"
+        log.warning("audio engine stalled for 2 s")
+        push_state()
+
     if now - _last_meter > 0.1:
         _last_meter = now
         ui.send_message("meter", {
             "in": round(engine.level_in, 3),
+            "raw": round(engine.level_raw, 4),
             "floor_db": round(20 * math.log10(engine.cond.floor + 1e-12), 1),
             "out": round(engine.level_out, 3),
             "fx_index": settings["fx_index"],

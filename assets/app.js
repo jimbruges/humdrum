@@ -88,6 +88,8 @@ function renderMeter() {
   const pct = (v) => `${Math.min(100, Math.round(Math.sqrt(v || 0) * 100))}%`;
   $("#m-in").style.setProperty("--w", pct(meter.in));
   $("#m-out").style.setProperty("--w", pct(meter.out));
+  $("#m-raw").style.setProperty("--w", pct(meter.raw));
+  renderInputHelp();
   $("#m-hand").style.setProperty("--w", `${Math.round((meter.hand || 0) * 100)}%`);
   $("#hand-mm").textContent = meter.hand_mm >= 0 ? `${meter.hand_mm} mm` : "no hand";
   if (!state) return;
@@ -320,8 +322,6 @@ const SETTINGS = [
   { key: "normalize", label: "normalise recordings", type: "toggle" },
   { key: "block", label: "audio block", type: "select", options: [256, 512, 1024, 2048] },
   { key: "buzzer_mode", label: "buzzer (modulino)", type: "select", options: ["off", "pads", "follow"] },
-  { key: "input_device", label: "input device", type: "text" },
-  { key: "output_device", label: "output device", type: "text" },
 ];
 
 function buildSettings() {
@@ -373,8 +373,92 @@ function renderSettings() {
     <dt>buzzer</dt><dd>${t.buzzer ? "yes" : "no"}</dd>
     <dt>distance</dt><dd>${t.distance ? "yes" : "no"}</dd>
     <dt>input</dt><dd>${state.devices.input}</dd>
-    <dt>output</dt><dd>${state.devices.output}</dd>`;
+    <dt>output</dt><dd>${state.devices.output}</dd>
+    <dt>audio blocks</dt><dd>${state.audio?.blocks ?? "?"} (mic reopened ${state.audio?.mic_reopens ?? 0}×)</dd>
+    <dt>last audio error</dt><dd>${state.audio?.last_error || "none"}</dd>
+    <dt>bad bus reads</dt><dd>${t.bad_reads ?? 0}</dd>`;
+  renderAudio();
 }
+
+// ---------------------------------------------------------------------------
+// audio devices and Media Carrier jacks
+// ---------------------------------------------------------------------------
+
+let devices = { inputs: [], outputs: [], ports: [] };
+
+async function loadDevices() {
+  try {
+    devices = await api("GET", "/api/audio/devices");
+  } catch (e) {
+    toast(e.message);
+  }
+  if (state) renderAudio();
+}
+
+function fillDeviceSelect(sel, list, value) {
+  const opts = [...(devices[list] || [])];
+  if (value && !opts.some((o) => o.id === value)) opts.push({ id: value, label: `${value} (not connected)` });
+  const sig = JSON.stringify(opts);
+  if (sel.dataset.sig !== sig) {
+    sel.innerHTML = "";
+    opts.forEach((o) => sel.add(new Option(o.label, o.id)));
+    sel.dataset.sig = sig;
+  }
+  if (document.activeElement !== sel) sel.value = value;
+}
+
+$("#dev-in").onchange = (e) => sendSettings({ input_device: e.target.value });
+$("#dev-out").onchange = (e) => sendSettings({ output_device: e.target.value });
+
+function renderAudio() {
+  fillDeviceSelect($("#dev-in"), "inputs", state.settings.input_device);
+  fillDeviceSelect($("#dev-out"), "outputs", state.settings.output_device);
+  const carrier = state.audio ? state.audio.carrier : true;
+  $("#ports-wrap").hidden = !carrier;
+  $("#identify").disabled = !carrier;
+
+  const wrap = $("#ports");
+  const on = state.settings.carrier_outputs || [];
+  if (wrap.childElementCount !== devices.ports.length) {
+    wrap.innerHTML = "";
+    for (const p of devices.ports) {
+      const row = document.createElement("label");
+      row.className = "setting toggle";
+      row.innerHTML = `<span>${p.label}</span>`;
+      const cb = Object.assign(document.createElement("input"), { type: "checkbox", className: "switch" });
+      cb.dataset.port = p.id;
+      cb.onchange = () => {
+        const picked = [...wrap.querySelectorAll("input")].filter((x) => x.checked).map((x) => x.dataset.port);
+        sendSettings({ carrier_outputs: picked });
+      };
+      row.append(cb);
+      wrap.appendChild(row);
+    }
+  }
+  wrap.querySelectorAll("input").forEach((cb) => (cb.checked = on.includes(cb.dataset.port)));
+}
+
+// what the mic meter means right now
+function renderInputHelp() {
+  const db = (v) => (v > 0 ? Math.round(20 * Math.log10(v)) : -120);
+  const raw = db(meter.raw), floor = meter.floor_db;
+  let msg;
+  if (state && state.audio && state.audio.stalled) msg = "Audio has stopped: the sound card stopped taking data. Restart the app (stop and start it in App Lab).";
+  else if (state && state.devices.input !== "open") msg = `Mic input: ${state.devices.input}.`;
+  else if (raw <= -100) msg = "No signal at all from the mic input. Is the input device right, and the mic plugged in?";
+  else if (floor > -35) msg = `The input is noisy (noise floor ${Math.round(floor)} dB), so the noise gate is muting the mic. A 3-pole mic in the combo jack, or a loose plug, does this.`;
+  else msg = `Mic level ${raw} dB, noise floor ${Math.round(floor)} dB.`;
+  $("#in-help").textContent = msg;
+}
+
+const TEST_HELP = $("#test-status").innerHTML;
+socket.on("audio_test", (m) => {
+  $("#test-status").innerHTML = m.done ? TEST_HELP : `Now playing: <b>${m.label}</b> (${m.beeps} beep${m.beeps > 1 ? "s" : ""}).`;
+});
+
+$("#tone").onclick = () => api("POST", "/api/audio/tone", { freq: 440, beeps: 2 }).catch((e) => toast(e.message));
+$("#identify").onclick = () => api("POST", "/api/audio/identify").catch((e) => toast(e.message));
+$("#refresh-devices").onclick = loadDevices;
 
 document.querySelectorAll("[data-sys]").forEach((b) => (b.onclick = async () => {
   const action = b.dataset.sys;
@@ -399,6 +483,7 @@ function render() {
 }
 
 buildSettings();
+loadDevices();
 api("GET", "/api/state").then((s) => { state = s; render(); }).catch(() => {});
 
 // Phones open captive portals in a stripped-down web view where file pickers
