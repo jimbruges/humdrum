@@ -1,0 +1,17 @@
+{
+  "name": "Dancehall",
+  "pads": [
+    {"file": "airhorn.wav", "name": "airhorn", "mode": "oneshot"},
+    {"file": "airhorn-long.wav", "name": "airhorn long", "mode": "gate"},
+    {"file": "explosion.wav", "name": "explosion", "mode": "oneshot"},
+    {"file": "bomb-drop.wav", "name": "bomb drop", "mode": "oneshot"},
+    {"file": "fireworks.wav", "name": "fireworks", "mode": "oneshot"},
+    {"file": "door-slam.wav", "name": "door slam", "mode": "oneshot"},
+    {"file": "dub-siren.wav", "name": "dub siren", "mode": "oneshot"},
+    {"file": "laser.wav", "name": "laser", "mode": "oneshot"},
+    {"file": "rewind.wav", "name": "rewind", "mode": "oneshot"},
+    {"file": "bass-drop.wav", "name": "bass drop", "mode": "oneshot"},
+    {"file": "riser.wav", "name": "riser", "mode": "oneshot"},
+    {"file": "whistle.wav", "name": "whistle", "mode": "oneshot"}
+  ]
+}

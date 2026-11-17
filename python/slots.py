@@ -1,15 +1,20 @@
-"""Sample slots: storage on disk, decoding and per-slot playback settings.
+"""Sample library and pad slots.
 
-A slot is addressed by pad number (module order on the Qwiic bus x 3 + button).
-Audio is kept at 48 kHz mono float32 in memory and 16-bit WAV on disk, so a
-slot survives modules being unplugged and comes back when they are.
+Every sound lives in the on-board library, in one of two folders:
+`library/uploads` (files sent from the web UI, named after the file) and
+`library/recordings` (taken from the mic, named after the pad and the time).
+A pad only points at a library sample and keeps its own playback settings,
+so the same sound can sit on several pads and survives being unassigned.
+Audio is 48 kHz mono float32 in memory and 16-bit WAV on disk.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import re
 import threading
+import time
 import wave
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -21,11 +26,105 @@ MAX_PADS = 48
 MAX_SECONDS = 30
 
 MODES = ("oneshot", "gate", "loop")
+KINDS = ("uploads", "recordings")
 MATRIX_COLS = 13  # width of the UNO Q LED matrix
+
+
+def _slug(name: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-.").lower()
+    return s[:40] or "sample"
+
+
+class Library:
+    """Named WAV files on disk, indexed in library.json."""
+
+    def __init__(self, root: Path) -> None:
+        self.dir = root / "library"
+        for k in KINDS:
+            (self.dir / k).mkdir(parents=True, exist_ok=True)
+        self.index_path = self.dir / "library.json"
+        self.items: dict[str, dict] = {}
+        self._cache: dict[str, np.ndarray] = {}
+        self.lock = threading.Lock()
+        if self.index_path.exists():
+            try:
+                self.items = json.loads(self.index_path.read_text()).get("items", {})
+            except ValueError:
+                self.items = {}
+        # forget entries whose file has gone
+        self.items = {i: m for i, m in self.items.items() if (self.dir / i).exists()}
+
+    def _save(self) -> None:
+        tmp = self.index_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"items": self.items}, indent=1))
+        tmp.replace(self.index_path)
+
+    def add(self, audio: np.ndarray, name: str, kind: str) -> str:
+        kind = kind if kind in KINDS else "uploads"
+        audio = audio[: SR * MAX_SECONDS].astype(np.float32)
+        with self.lock:
+            stem, n = _slug(name), 1
+            sid = f"{kind}/{stem}.wav"
+            while sid in self.items or (self.dir / sid).exists():
+                n += 1
+                sid = f"{kind}/{stem}-{n}.wav"
+            (self.dir / sid).write_bytes(encode_wav(audio))
+            self.items[sid] = {"name": name.strip()[:40] or stem, "kind": kind,
+                               "seconds": round(len(audio) / SR, 2), "created": int(time.time())}
+            self._cache[sid] = audio
+            self._save()
+        return sid
+
+    def find_kit(self, key: str) -> str | None:
+        """The library id of the kit sample `key` ("dancehall/airhorn.wav"), if it's in."""
+        return next((sid for sid, it in self.items.items() if it.get("kit") == key), None)
+
+    def mark_kit(self, sid: str, key: str) -> None:
+        with self.lock:
+            if sid in self.items:
+                self.items[sid]["kit"] = key
+                self._save()
+
+    def audio(self, sid: str) -> np.ndarray | None:
+        if sid not in self.items:
+            return None
+        if sid not in self._cache:
+            try:
+                self._cache[sid] = decode_wav((self.dir / sid).read_bytes())
+            except Exception:
+                return None
+        return self._cache[sid]
+
+    def name(self, sid: str) -> str:
+        return self.items.get(sid, {}).get("name", "")
+
+    def rename(self, sid: str, name: str) -> None:
+        with self.lock:
+            if sid in self.items and name.strip():
+                self.items[sid]["name"] = name.strip()[:40]
+                self._save()
+
+    def delete(self, sid: str) -> None:
+        with self.lock:
+            if sid in self.items:
+                (self.dir / sid).unlink(missing_ok=True)
+                self.items.pop(sid)
+                self._cache.pop(sid, None)
+                self._save()
+
+    def wav_bytes(self, sid: str) -> bytes | None:
+        p = self.dir / sid
+        return p.read_bytes() if sid in self.items and p.exists() else None
+
+    def describe(self) -> list[dict]:
+        out = [{"id": i, **m} for i, m in self.items.items()]
+        out.sort(key=lambda d: (d["kind"], -d["created"] if d["kind"] == "recordings" else 0, d["name"].lower()))
+        return out
 
 
 @dataclass
 class SlotMeta:
+    sample: str = ""  # library id, "" = empty pad
     name: str = ""
     gain: float = 1.0
     mode: str = "oneshot"
@@ -38,7 +137,7 @@ class SlotMeta:
 @dataclass
 class Slot:
     meta: SlotMeta = field(default_factory=SlotMeta)
-    raw: np.ndarray | None = None  # as recorded/uploaded
+    raw: np.ndarray | None = None  # the library sample
     play: np.ndarray | None = None  # trimmed, pitched, reversed, gain applied
     matrix_env: list[float] = field(default_factory=list)  # play buffer's shape, one value per matrix column
 
@@ -49,6 +148,7 @@ class Slot:
 
 class SlotBank:
     def __init__(self, root: Path) -> None:
+        self.library = Library(root)
         self.dir = root / "slots"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.meta_path = self.dir / "slots.json"
@@ -59,9 +159,6 @@ class SlotBank:
 
     # -- persistence ---------------------------------------------------------
 
-    def _wav_path(self, pad: int) -> Path:
-        return self.dir / f"pad{pad:02d}.wav"
-
     def _load_all(self) -> None:
         metas = {}
         if self.meta_path.exists():
@@ -69,18 +166,34 @@ class SlotBank:
                 metas = json.loads(self.meta_path.read_text())
             except ValueError:
                 metas = {}
+        migrated = False
         for pad in range(MAX_PADS):
             m = metas.get(str(pad))
             if m:
                 known = {k: v for k, v in m.items() if k in SlotMeta.__dataclass_fields__}
                 self.slots[pad].meta = SlotMeta(**known)
-            p = self._wav_path(pad)
-            if p.exists():
+            old = self.dir / f"pad{pad:02d}.wav"
+            if old.exists() and not self.slots[pad].meta.sample:
+                # Before the library existed each pad had its own WAV: move it in.
                 try:
-                    self.slots[pad].raw = decode_wav(p.read_bytes())
-                    self._render(pad)
+                    audio = decode_wav(old.read_bytes())
+                    name = self.slots[pad].meta.name or f"Pad {pad + 1}"
+                    kind = "recordings" if name.upper().startswith("REC") else "uploads"
+                    self.slots[pad].meta.sample = self.library.add(audio, name, kind)
+                    old.unlink()
+                    migrated = True
                 except Exception:
-                    p.unlink(missing_ok=True)
+                    old.unlink(missing_ok=True)
+            self._attach(pad)
+        if migrated:
+            self._save_meta()
+
+    def _attach(self, pad: int) -> None:
+        s = self.slots[pad]
+        s.raw = self.library.audio(s.meta.sample) if s.meta.sample else None
+        if s.raw is None:
+            s.meta.sample = ""
+        self._render(pad)
 
     def _save_meta(self) -> None:
         data = {str(i): asdict(s.meta) for i, s in enumerate(self.slots) if s.loaded}
@@ -117,22 +230,52 @@ class SlotBank:
         s.play = x
         s.matrix_env = envelope(x, MATRIX_COLS)
 
-    def set_audio(self, pad: int, audio: np.ndarray, name: str = "") -> None:
-        audio = audio[: SR * MAX_SECONDS].astype(np.float32)
+    def assign(self, pad: int, sid: str, mode: str | None = None) -> None:
+        """Put a library sample on a pad ("" empties it). Trim, pitch and so on start fresh."""
         with self.lock:
             s = self.slots[pad]
-            s.raw = audio
-            s.meta = SlotMeta(name=name or f"PAD {pad + 1:02d}", mode=s.meta.mode if s.loaded else "oneshot")
-            self._render(pad)
-            self._wav_path(pad).write_bytes(encode_wav(audio))
+            mode = mode or (s.meta.mode if s.loaded else "oneshot")
+            s.meta = SlotMeta(sample=sid, name=self.library.name(sid), mode=mode) if sid else SlotMeta()
+            self._attach(pad)
             self._save_meta()
             self.version += 1
+
+    def load_kits(self, samples_dir: Path, lay_out: bool) -> int:
+        """Add the sample kits shipped with the app (samples/<kit>/kit.json) to the
+        library, once each. With `lay_out`, also put them on the pads in kit order
+        (the first kit from pad 1), replacing what's there; the library keeps
+        everything, so nothing is lost. Returns how many pads were laid out."""
+        pad = 0
+        for manifest in sorted(samples_dir.glob("*/kit.json")):
+            try:
+                kit = json.loads(manifest.read_text())
+            except ValueError:
+                continue
+            for entry in kit.get("pads", []):
+                key = f"{manifest.parent.name}/{entry['file']}"
+                sid = self.library.find_kit(key)
+                if sid is None:
+                    path = manifest.parent / entry["file"]
+                    if not path.exists():
+                        continue
+                    sid = self.library.add(decode_wav(path.read_bytes()), entry.get("name") or path.stem, "uploads")
+                    self.library.mark_kit(sid, key)
+                if lay_out and pad < MAX_PADS:
+                    self.assign(pad, sid, entry.get("mode", "oneshot"))
+                    pad += 1
+        return pad
+
+    def set_audio(self, pad: int, audio: np.ndarray, name: str = "", kind: str = "uploads") -> str:
+        """Add a new sound to the library and put it on `pad`."""
+        sid = self.library.add(audio, name or f"Pad {pad + 1}", kind)
+        self.assign(pad, sid)
+        return sid
 
     def update_meta(self, pad: int, changes: dict) -> None:
         with self.lock:
             s = self.slots[pad]
             for k, v in changes.items():
-                if k not in SlotMeta.__dataclass_fields__:
+                if k not in SlotMeta.__dataclass_fields__ or k == "sample":
                     continue
                 if k == "mode" and v not in MODES:
                     continue
@@ -146,25 +289,33 @@ class SlotBank:
             self.version += 1
 
     def clear(self, pad: int) -> None:
-        with self.lock:
-            self.slots[pad] = Slot()
-            self._wav_path(pad).unlink(missing_ok=True)
-            self._save_meta()
-            self.version += 1
+        """Empty the pad; the sample stays in the library."""
+        self.assign(pad, "")
 
     def swap(self, a: int, b: int) -> None:
         with self.lock:
             self.slots[a], self.slots[b] = self.slots[b], self.slots[a]
-            pa, pb = self._wav_path(a), self._wav_path(b)
-            tmp = self.dir / "swap.tmp"
-            if pa.exists():
-                pa.replace(tmp)
-            if pb.exists():
-                pb.replace(pa)
-            if tmp.exists():
-                tmp.replace(pb)
             self._save_meta()
             self.version += 1
+
+    def rename_sample(self, sid: str, name: str) -> None:
+        self.library.rename(sid, name)
+        with self.lock:
+            for s in self.slots:
+                if s.meta.sample == sid:
+                    s.meta.name = self.library.name(sid)
+            self._save_meta()
+            self.version += 1
+
+    def delete_sample(self, sid: str) -> list[int]:
+        """Remove a sample from the library; pads that used it become empty."""
+        pads = [i for i, s in enumerate(self.slots) if s.meta.sample == sid]
+        for pad in pads:
+            self.assign(pad, "")
+        self.library.delete(sid)
+        with self.lock:
+            self.version += 1
+        return pads
 
     # -- queries -------------------------------------------------------------
 
@@ -172,8 +323,7 @@ class SlotBank:
         return self.slots[pad].play if 0 <= pad < MAX_PADS else None
 
     def wav_bytes(self, pad: int) -> bytes | None:
-        p = self._wav_path(pad)
-        return p.read_bytes() if p.exists() else None
+        return self.library.wav_bytes(self.slots[pad].meta.sample) if self.slots[pad].loaded else None
 
     def describe(self, pad: int) -> dict:
         s = self.slots[pad]

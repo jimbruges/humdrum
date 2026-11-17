@@ -13,7 +13,7 @@
       <span class="logo">H</span>
       <div>
         <h1>HUMDRUM</h1>
-        <p class="sub">voice fx / sample pads</p>
+        <p class="sub">voice fx / sample pads / bluetooth</p>
       </div>
     </div>
     <div class="status">
@@ -22,21 +22,29 @@
     </div>
   </header>
 
+  <div id="enrol-hint" class="hint enrol" hidden></div>
+
   <div id="cna-hint" class="hint" hidden>
     Uploading files may not work in this pop-up window. Open
     <b><span class="url"></span></b> in your browser instead.
   </div>
 
   <main>
-    <!-- FX ------------------------------------------------------------------>
+    <!-- MIC ------------------------------------------------------------------>
     <section class="panel fx">
       <div class="panel-head">
         <h2><span class="num">01</span> mic fx</h2>
-        <button id="bypass" class="chip">bypass</button>
+        <span class="chips"><button id="mic-mute" class="chip">mute</button><button id="bypass" class="chip">bypass fx</button></span>
+      </div>
+      <p class="help warn" id="mic-warn" hidden></p>
+      <div class="amount">
+        <label for="mic-level">mic volume</label>
+        <input id="mic-level" type="range" min="0" max="1.5" step="0.01">
+        <output id="mic-level-val" class="mono">0</output>
       </div>
       <div id="fx-list" class="fx-list"></div>
       <div class="amount">
-        <label for="amount">amount</label>
+        <label for="amount">fx amount</label>
         <input id="amount" type="range" min="0" max="1" step="0.01">
         <output id="amount-val" class="mono">0</output>
       </div>
@@ -47,20 +55,81 @@
       </div>
     </section>
 
+    <!-- BLUETOOTH + SAMPLE PADS -------------------------------------------------->
+    <section class="panel bt">
+      <div class="panel-head">
+        <h2><span class="num">02</span> bluetooth + sample pads</h2>
+        <span class="chips"><button id="bt-mute" class="chip">mute phone</button><button id="bt-bypass" class="chip">bypass fx</button></span>
+      </div>
+      <p class="help" id="bt-status">Checking Bluetooth…</p>
+      <div class="bt-now" id="bt-now" hidden>
+        <div class="bt-track"><b id="bt-title"></b><small id="bt-artist"></small></div>
+        <div class="bt-transport">
+          <button class="chip" data-bt="previous" aria-label="previous">&#9198;</button>
+          <button class="chip solid" data-bt="playpause" id="bt-pp" aria-label="play or pause">&#9199;</button>
+          <button class="chip" data-bt="next" aria-label="next">&#9197;</button>
+        </div>
+      </div>
+      <div class="amount">
+        <label for="bt-level">phone volume</label>
+        <input id="bt-level" type="range" min="0" max="1000" step="1">
+        <output id="bt-level-val" class="mono">0</output>
+      </div>
+      <div class="amount">
+        <label for="pads-level">pads volume</label>
+        <input id="pads-level" type="range" min="0" max="1000" step="1">
+        <output id="pads-level-val" class="mono">0</output>
+      </div>
+      <div id="bt-fx-list" class="fx-list"></div>
+      <div class="amount">
+        <label for="bt-amount">fx amount</label>
+        <input id="bt-amount" type="range" min="0" max="1" step="0.01">
+        <output id="bt-amount-val" class="mono">0</output>
+      </div>
+      <div class="meters">
+        <div class="meter"><span>in</span><i id="m-bt-in"></i></div>
+        <div class="meter"><span>out</span><i id="m-play-out"></i></div>
+      </div>
+      <div class="sys-row">
+        <label class="setting toggle"><span>visible to new phones</span><input id="bt-visible" type="checkbox" class="switch"></label>
+        <button id="bt-disconnect" class="chip">disconnect phone</button>
+      </div>
+    </section>
+
     <!-- PADS ---------------------------------------------------------------->
     <section class="panel pads-panel">
       <div class="panel-head">
-        <h2><span class="num">02</span> pads</h2>
+        <h2><span class="num">03</span> pads</h2>
         <button id="stop-all" class="chip">stop all</button>
       </div>
-      <p class="help">Tap a pad to upload a sound. Hold a hardware pad to record from the mic.</p>
+      <p class="help">Pick each pad's sound from the library, or tap an empty pad to upload one. Tap a loaded pad to trim, pitch or loop it.
+        Hold a hardware pad to record from the mic.</p>
       <div id="pads" class="pads"></div>
       <p id="no-pads" class="empty" hidden>No Modulino Buttons found. Plug one in &mdash; it gets its address automatically.</p>
     </section>
 
+    <!-- LIBRARY ------------------------------------------------------------->
+    <section class="panel library">
+      <div class="panel-head">
+        <h2><span class="num">04</span> library</h2>
+        <button id="lib-upload" class="chip solid">+ upload</button>
+      </div>
+      <p class="help">Every sound saved on the board. Uploads keep their file name; mic recordings are named after the pad and the time they were made.
+        Deleting a sound here also empties any pad using it.</p>
+      <h3>uploads</h3>
+      <div class="lib-list" id="lib-uploads"></div>
+      <h3>mic recordings</h3>
+      <div class="lib-list" id="lib-recordings"></div>
+    </section>
+
     <!-- SETTINGS ------------------------------------------------------------>
     <section class="panel settings">
-      <div class="panel-head"><h2><span class="num">03</span> settings</h2></div>
+      <div class="panel-head"><h2><span class="num">05</span> settings</h2></div>
+      <div class="controls">
+        <h3>modules</h3>
+        <p class="help">What each knob, Buttons and Pixels module does, the order they're numbered in, live feedback
+          from each one, and setting up new modules: <a href="modules.html"><b>open the modules page</b></a>.</p>
+      </div>
       <div class="grid-settings" id="settings"></div>
       <div class="audio-io">
         <h3>audio in / out</h3>
@@ -90,10 +159,7 @@
         <div class="sys-row">
           <button data-sys="rescan" class="chip">rescan bus</button>
           <button data-sys="reopen_audio" class="chip">reopen audio</button>
-          <button data-sys="reset_addresses" class="chip warn">reset button addresses</button>
         </div>
-        <p class="help">Reset moves every Buttons module back to its factory address. Then unplug them all
-          and plug them back in one by one, in the order you want the pads numbered.</p>
         <dl class="diag" id="diag"></dl>
       </details>
     </section>
@@ -104,7 +170,7 @@
     <form method="dialog" class="ed">
       <div class="ed-head">
         <span class="padno mono" id="ed-no">01</span>
-        <input id="ed-name" maxlength="24" placeholder="name" autocomplete="off">
+        <input id="ed-name" maxlength="40" placeholder="name" autocomplete="off" title="renames the sample in the library">
         <button value="close" class="x" aria-label="close">&times;</button>
       </div>
       <div class="wave-wrap">
@@ -127,7 +193,7 @@
         <button type="button" id="ed-reverse" class="chip">reverse</button>
         <button type="button" id="ed-replace" class="chip">replace</button>
         <a id="ed-download" class="chip">download</a>
-        <button type="button" id="ed-clear" class="chip warn">clear</button>
+        <button type="button" id="ed-clear" class="chip warn">remove from pad</button>
       </div>
       <div class="ed-move">
         <label>move to pad <select id="ed-move"></select></label>

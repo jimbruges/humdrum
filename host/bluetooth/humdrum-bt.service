@@ -1,0 +1,13 @@
+[Unit]
+Description=Humdrum Bluetooth helper (pairing agent, media controls for the app)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Environment=HUMDRUM_BT_NAME=@NAME@
+ExecStart=/usr/bin/python3 /usr/local/lib/humdrum/humdrum-bt.py @SOCK@
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

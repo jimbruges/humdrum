@@ -1,10 +1,11 @@
 // Humdrum — MCU side (STM32U585)
 //
 // Owns everything on the Qwiic bus and the on-board LED matrix:
-//   * discovers any number of Modulino Buttons (3 pads each), one Modulino Knob,
+//   * discovers any number of Modulino Buttons (3 pads each), up to 4 Modulino Knobs,
+//     up to 4 Modulino Pixels (used as level meters),
 //     an optional Modulino Buzzer (a tone-only "speaker" for testing) and an
 //     optional Modulino Distance (hand height for the theremin effect)
-//   * gives each newly plugged Buttons module its own I2C address automatically
+//   * gives each newly plugged Buttons, Knob or Pixels module its own I2C address automatically
 //   * reports pad / knob events to Linux over the Bridge
 //   * shows pad states on the button LEDs and frames sent by Linux on the matrix
 //
@@ -15,6 +16,7 @@
 #include <Arduino_LED_Matrix.h>
 #include <Wire.h>
 #include <vector>
+#include <stm32u5xx.h>
 
 // ST's time-of-flight drivers, vendored in src/ so the sketch builds offline.
 // Modulino Distance boards carry either a VL53L4CD or a VL53L4ED.
@@ -30,6 +32,7 @@ static const uint8_t PINSTRAP_BUTTONS = 0x7C;
 static const uint8_t PINSTRAP_KNOB_A = 0x74;
 static const uint8_t PINSTRAP_KNOB_B = 0x76;
 static const uint8_t PINSTRAP_BUZZER = 0x3C;
+static const uint8_t PINSTRAP_PIXELS = 0x6C;
 // The Distance module is a bare ST sensor, not a Modulino MCU: fixed address and
 // no pinstrap byte, so it's handled separately from the scan.
 static const uint8_t TOF_ADDR = 0x29;
@@ -41,6 +44,20 @@ static const uint8_t BUTTONS_FIRST_ADDR = 0x40;
 static const uint8_t BUTTONS_LAST_ADDR = 0x5F;
 static const uint8_t RESERVED_ADDRS[] = { 0x44 };  // Modulino Thermo is fixed here
 
+// Knobs ship on 0x3A (or 0x3B with the solder jumper); new ones are moved here,
+// in plug-in order, so several can share the bus. Knob 1 is the first plugged.
+static const uint8_t KNOB_DEFAULT_ADDRS[] = { 0x3A, 0x3B };
+static const uint8_t KNOB_FIRST_ADDR = 0x60;
+static const uint8_t KNOB_LAST_ADDR = 0x67;
+static const int MAX_KNOBS = 4;
+// Pixels ship on 0x36 and are moved here in plug-in order.
+static const uint8_t PIXELS_DEFAULT_ADDR = 0x36;
+static const uint8_t PIXELS_FIRST_ADDR = 0x70;
+static const uint8_t PIXELS_LAST_ADDR = 0x77;
+static const int MAX_PIXELS = 4;
+static const int PIXELS_LEDS = 8;
+static const uint8_t PIXELS_BRIGHTNESS = 2;  // of 31: each lit LED draws little; the chain shares one 3.3 V supply
+
 static const int MAX_MODULES = 16;  // 48 pads
 static const int PADS_PER_MODULE = 3;
 static const int MAX_PADS = MAX_MODULES * PADS_PER_MODULE;
@@ -48,8 +65,10 @@ static const int MAX_PADS = MAX_MODULES * PADS_PER_MODULE;
 // ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
+// 100 kHz: a long chain of Modulinos and Qwiic cables is too much load for 400 kHz
+static const uint32_t BUS_HZ = 100000;
 static const uint32_t SCAN_INTERVAL_MS = 1000;
-static const uint32_t POLL_INTERVAL_MS = 4;
+static const uint32_t POLL_INTERVAL_MS = 10;  // keeps the bus mostly idle; still under the 12 ms debounce
 static const uint32_t KNOB_REPORT_MS = 15;
 static const uint32_t KNOB_LONG_MS = 700;
 static const uint32_t DEBOUNCE_MS = 12;
@@ -84,22 +103,45 @@ Arduino_LED_Matrix matrix;
 ButtonsModule modules[MAX_MODULES];
 int moduleCount = 0;
 
-uint8_t knobAddr = 0;  // 0 = not present
+struct KnobModule {
+  uint8_t addr;
+  int16_t last;
+  int32_t accum;
+  uint32_t lastReport;
+  bool down;
+  bool rawLast;
+  uint8_t rawRun;
+  uint32_t downAt;
+  bool longSent;
+};
+KnobModule knobs[MAX_KNOBS];
+int knobCount = 0;
+
+struct PixelsModule {
+  uint8_t addr;
+  uint8_t level;  // 0..255 from Linux
+  uint8_t tint;   // 0..255: how much effect is on what it meters (green -> blue)
+  uint8_t shown;  // LEDs lit last time we wrote, 0xFF = unknown
+  uint8_t shownTint;
+};
+PixelsModule pixels[MAX_PIXELS];
+int pixelsCount = 0;
+String busReport;  // "40:7c,60:74,..." everything that answered in the last scan
+bool busReported = false;  // so an empty bus gets reported too
 uint8_t buzzerAddr = 0;
 
+// Why the Distance sensor didn't start, for the bus report: 1 = no reply to
+// the ID read, 2 = wrong ID (tofId), 3 = the sensor's own setup failed
+int tofErr = 0;
+uint16_t tofId = 0;
+uint32_t tofRetryAt = 0;
+static const uint32_t TOF_RETRY_MS = 10000;  // a failed start blocks for up to 2 s
 VL53L4CD* tofCD = nullptr;  // whichever variant answered
 VL53L4ED* tofED = nullptr;
 int16_t handMm = -1;  // -1: nothing in range
 int16_t handReported = -2;
 uint32_t lastTofPoll = 0;
 uint32_t lastTofReport = 0;
-int16_t knobLast = 0;
-int32_t knobAccum = 0;
-bool knobDown = false;
-bool knobRawLast = false;
-uint8_t knobRawRun = 0;
-uint32_t knobDownAt = 0;
-bool knobLongSent = false;
 uint32_t badReads = 0;  // Modulino reads rejected as corrupted
 
 uint8_t padStates[MAX_PADS];
@@ -107,7 +149,6 @@ uint32_t holdMs = 600;
 
 uint32_t lastScan = 0;
 uint32_t lastPoll = 0;
-uint32_t lastKnobReport = 0;
 bool topologyDirty = true;
 // After reset_addresses() every module sits on the factory address at once;
 // don't enrol until the user has unplugged them all, or they'd all move together.
@@ -121,6 +162,39 @@ bool framePending = false;
 // ---------------------------------------------------------------------------
 // Raw Modulino I/O
 // ---------------------------------------------------------------------------
+
+// Free the bus when a module is holding it. If the MCU restarts halfway through
+// a read, a module can sit holding SDA low waiting for clocks that never come,
+// and then nothing in the chain answers until it is unplugged. Clocking SCL by
+// hand until it lets go, then sending a STOP, frees it. Qwiic: PD12 SCL, PD13 SDA.
+bool recoverBus() {
+  static const uint32_t SCL_PIN = 12, SDA_PIN = 13;
+  GPIO_TypeDef* g = GPIOD;
+  RCC->AHB2ENR1 |= RCC_AHB2ENR1_GPIODEN;
+  if (g->IDR & (1u << SDA_PIN)) return false;  // not stuck
+  uint32_t moder = g->MODER, otyper = g->OTYPER;
+  g->BSRR = (1u << SCL_PIN) | (1u << SDA_PIN);  // both released
+  g->OTYPER |= (1u << SCL_PIN) | (1u << SDA_PIN);  // open drain
+  g->MODER = (g->MODER & ~((3u << SCL_PIN * 2) | (3u << SDA_PIN * 2))) | (1u << SCL_PIN * 2) | (1u << SDA_PIN * 2);
+  for (int i = 0; i < 18 && !(g->IDR & (1u << SDA_PIN)); i++) {
+    g->BRR = 1u << SCL_PIN;
+    delayMicroseconds(5);
+    g->BSRR = 1u << SCL_PIN;
+    delayMicroseconds(5);
+  }
+  g->BRR = 1u << SDA_PIN;  // STOP: SDA rises while SCL is high
+  delayMicroseconds(5);
+  g->BSRR = 1u << SDA_PIN;
+  delayMicroseconds(5);
+  g->OTYPER = otyper;
+  g->MODER = moder;
+  if (I2C4->CR1 & I2C_CR1_PE) {  // and reset the I2C peripheral's own state
+    I2C4->CR1 &= ~I2C_CR1_PE;
+    delayMicroseconds(5);
+    I2C4->CR1 |= I2C_CR1_PE;
+  }
+  return true;
+}
 
 bool probe(uint8_t addr) {
   Wire1.beginTransmission(addr);
@@ -147,13 +221,49 @@ void modWrite(uint8_t addr, const uint8_t* buf, int n) {
   Wire1.endTransmission();
 }
 
-// Same protocol as the Modulino AddressChanger utility: the new address is
-// stored in the module's flash.
-bool changeAddress(uint8_t from, uint8_t to) {
-  uint8_t data[40] = { 'C', 'F', (uint8_t)(to * 2) };
-  modWrite(from, data, sizeof(data));
-  delay(500);
-  return probe(to);
+void flashModule(uint8_t addr);
+
+// Same protocol as Arduino's Modulino AddressChanger. The module stores the new
+// address in flash, but only uses it after a power cycle (it goes quiet until
+// then, and NACKs the end of the command as it restarts), so this just sends it.
+// The user then unplugs and replugs that one module to finish.
+void sendAddress(uint8_t from, uint8_t to) {
+  uint8_t data[40] = { 'C', 'F', (uint8_t)(to * 2) };  // to = 0: back to the factory address
+  Wire1.beginTransmission(from);
+  Wire1.write(data, sizeof(data));
+  Wire1.endTransmission();
+  delay(50);
+}
+
+// One new module is set up at a time: it gets an address, then waits for its replug.
+uint8_t pendingTo = 0;    // address the new module will come back on, 0 = none
+uint8_t pendingPin = 0;   // its pinstrap, to recognise it there
+uint32_t pendingSince = 0;
+// Off while modules are being set up one at a time from the web UI: then
+// nothing moves on its own and Linux chooses each address (see setAddress()).
+bool autoEnrol = true;
+static const uint32_t ENROL_RESEND_MS = 20000;  // still on the factory address: send again
+
+// States reported to Linux with notify("enrol", addr, state)
+enum EnrolState { ENROL_REPLUG = 1, ENROL_DONE = 2, ENROL_RESET = 3 };
+
+void enrol(uint8_t from, uint8_t pin, uint8_t target) {
+  if (!target) return;
+  uint32_t now = millis();
+  if (pendingTo && now - pendingSince < ENROL_RESEND_MS) return;  // waiting for the replug
+  sendAddress(from, target);
+  pendingTo = target;
+  pendingPin = pin;
+  pendingSince = now;
+  Bridge.notify("enrol", (int)target, (int)ENROL_REPLUG);
+}
+
+// Called for every module that answers on its own (non-factory) address.
+void checkEnrolled(uint8_t addr, uint8_t pin) {
+  if (!pendingTo || addr != pendingTo || pin != pendingPin) return;
+  pendingTo = 0;
+  Bridge.notify("enrol", (int)addr, (int)ENROL_DONE);
+  if (pin == PINSTRAP_BUTTONS) flashModule(addr);
 }
 
 void flashModule(uint8_t addr) {
@@ -176,7 +286,16 @@ bool tofReady() {
 
 void tofStart() {
   tofCD = new VL53L4CD(&Wire1, -1);
+  tofId = 0;
+  if (tofCD->VL53L4CD_GetSensorId(&tofId) != VL53L4CD_ERROR_NONE) {
+    tofErr = 1;
+    delete tofCD;
+    tofCD = nullptr;
+    return;
+  }
+  tofErr = tofId == 0xEBAA ? 3 : 2;
   if (tofCD->InitSensor() == VL53L4CD_ERROR_NONE) {
+    tofErr = 0;
     tofCD->VL53L4CD_SetRangeTiming(20, 0);
     tofCD->VL53L4CD_StartRanging();
     return;
@@ -187,6 +306,7 @@ void tofStart() {
   if (tofED->InitSensor() == VL53L4ED_ERROR_NONE) {
     tofED->VL53L4ED_SetRangeTiming(20, 0);
     tofED->VL53L4ED_StartRanging();
+    tofErr = 0;
     return;
   }
   delete tofED;
@@ -264,16 +384,78 @@ void addModule(uint8_t addr) {
 
 uint8_t nextFreeButtonsAddr() {
   for (uint8_t a = BUTTONS_FIRST_ADDR; a <= BUTTONS_LAST_ADDR; a++) {
-    if (isReserved(a) || a == knobAddr) continue;
+    if (isReserved(a)) continue;
     if (findModule(a) >= 0 || probe(a)) continue;
     return a;
   }
   return 0;
 }
 
+int findKnob(uint8_t addr) {
+  for (int i = 0; i < knobCount; i++)
+    if (knobs[i].addr == addr) return i;
+  return -1;
+}
+
+void addKnob(uint8_t addr) {
+  if (knobCount >= MAX_KNOBS) return;
+  KnobModule& k = knobs[knobCount++];
+  memset(&k, 0, sizeof(k));
+  k.addr = addr;
+  uint8_t b[3];
+  if (modRead(addr, b, 3)) k.last = (int16_t)(b[0] | (b[1] << 8));
+  for (int i = knobCount - 1; i > 0 && knobs[i].addr < knobs[i - 1].addr; i--) {
+    KnobModule t = knobs[i];
+    knobs[i] = knobs[i - 1];
+    knobs[i - 1] = t;
+  }
+  topologyDirty = true;
+}
+
+bool isKnobDefault(uint8_t a) {
+  for (uint8_t d : KNOB_DEFAULT_ADDRS)
+    if (d == a) return true;
+  return false;
+}
+
+uint8_t nextFreeKnobAddr() {
+  for (uint8_t a = KNOB_FIRST_ADDR; a <= KNOB_LAST_ADDR; a++)
+    if (findKnob(a) < 0 && !probe(a)) return a;
+  return 0;
+}
+
+int findPixels(uint8_t addr) {
+  for (int i = 0; i < pixelsCount; i++)
+    if (pixels[i].addr == addr) return i;
+  return -1;
+}
+
+void addPixels(uint8_t addr) {
+  if (pixelsCount >= MAX_PIXELS) return;
+  PixelsModule& px = pixels[pixelsCount++];
+  px.addr = addr;
+  px.level = 0;
+  px.tint = 0;
+  px.shown = 0xFF;
+  for (int i = pixelsCount - 1; i > 0 && pixels[i].addr < pixels[i - 1].addr; i--) {
+    PixelsModule t = pixels[i];
+    pixels[i] = pixels[i - 1];
+    pixels[i - 1] = t;
+  }
+  topologyDirty = true;
+}
+
+uint8_t nextFreePixelsAddr() {
+  for (uint8_t a = PIXELS_FIRST_ADDR; a <= PIXELS_LAST_ADDR; a++)
+    if (findPixels(a) < 0 && !probe(a)) return a;
+  return 0;
+}
+
 void scanBus() {
   bool seen[MAX_MODULES] = { false };
-  bool knobSeen = false;
+  bool knobSeen[MAX_KNOBS] = { false };
+  bool pixelsSeen[MAX_PIXELS] = { false };
+  String report;
   bool buzzerSeen = false;
   bool tofSeen = false;
   bool defaultSeen = false;
@@ -282,23 +464,27 @@ void scanBus() {
     if (!probe(addr)) continue;
     if (addr == TOF_ADDR) {  // no pinstrap byte to read; don't disturb its register pointer
       tofSeen = true;
+      if (report.length()) report += ",";
+      report += String(addr, HEX) + ":tof";
+      if (!tofReady() && tofErr) report += "!" + String(tofErr) + "-" + String(tofId, HEX);
       continue;
     }
     uint8_t pin = 0, scratch[3];
-    if (!modRead(addr, scratch, 1, &pin)) continue;
+    bool ok = modRead(addr, scratch, 1, &pin);
+    if (report.length()) report += ",";
+    report += String(addr, HEX) + ":" + (ok ? String(pin, HEX) : String("?"));
+    if (!ok) continue;
 
     if (pin == PINSTRAP_BUTTONS) {
       uint8_t a = addr;
       if (a == BUTTONS_DEFAULT_ADDR) {
+        // Fresh module: give it the next free address, then it needs a replug.
         defaultSeen = true;
-        if (enrolHold) continue;
-        // Fresh module: move it out of the way so the next one can be plugged in.
-        uint8_t target = nextFreeButtonsAddr();
-        if (target && changeAddress(a, target)) {
-          a = target;
-          flashModule(a);
-        }
+        if (!enrolHold && autoEnrol) enrol(a, pin, nextFreeButtonsAddr());
+        continue;
       }
+      if (a < BUTTONS_FIRST_ADDR || a > BUTTONS_LAST_ADDR) continue;  // stray: fix it on the modules page
+      checkEnrolled(a, pin);
       int idx = findModule(a);
       if (idx < 0) {
         addModule(a);
@@ -311,14 +497,36 @@ void scanBus() {
         buzzerAddr = addr;
         topologyDirty = true;
       }
-    } else if (pin == PINSTRAP_KNOB_A || pin == PINSTRAP_KNOB_B) {
-      knobSeen = true;
-      if (knobAddr != addr) {
-        knobAddr = addr;
-        uint8_t b[3];
-        if (modRead(knobAddr, b, 3)) knobLast = (int16_t)(b[0] | (b[1] << 8));
-        topologyDirty = true;
+    } else if (pin == PINSTRAP_PIXELS) {
+      uint8_t a = addr;
+      if (a == PIXELS_DEFAULT_ADDR) {
+        defaultSeen = true;
+        if (!enrolHold && autoEnrol) enrol(a, pin, nextFreePixelsAddr());
+        continue;
       }
+      if (a < PIXELS_FIRST_ADDR || a > PIXELS_LAST_ADDR) continue;
+      checkEnrolled(a, pin);
+      int idx = findPixels(a);
+      if (idx < 0) {
+        addPixels(a);
+        idx = findPixels(a);
+      }
+      if (idx >= 0) pixelsSeen[idx] = true;
+    } else if (pin == PINSTRAP_KNOB_A || pin == PINSTRAP_KNOB_B) {
+      uint8_t a = addr;
+      if (isKnobDefault(a)) {
+        defaultSeen = true;
+        if (!enrolHold && autoEnrol) enrol(a, pin, nextFreeKnobAddr());
+        continue;
+      }
+      if (a < KNOB_FIRST_ADDR || a > KNOB_LAST_ADDR) continue;
+      checkEnrolled(a, pin);
+      int idx = findKnob(a);
+      if (idx < 0) {
+        addKnob(a);
+        idx = findKnob(a);
+      }
+      if (idx >= 0) knobSeen[idx] = true;
     }
   }
 
@@ -330,8 +538,9 @@ void scanBus() {
     topologyDirty = true;
   }
   if (!defaultSeen) enrolHold = false;
-  if (tofSeen && !tofReady()) {
+  if (tofSeen && !tofReady() && (int32_t)(millis() - tofRetryAt) >= 0) {
     tofStart();
+    tofRetryAt = millis() + TOF_RETRY_MS;
     if (tofReady()) topologyDirty = true;
   } else if (!tofSeen && tofReady()) {
     tofStop();
@@ -341,8 +550,25 @@ void scanBus() {
     buzzerAddr = 0;
     topologyDirty = true;
   }
-  if (!knobSeen && knobAddr) {
-    knobAddr = 0;
+  for (int i = pixelsCount - 1; i >= 0; i--) {
+    if (pixelsSeen[i]) continue;
+    for (int j = i; j < pixelsCount - 1; j++) pixels[j] = pixels[j + 1];
+    pixelsCount--;
+    topologyDirty = true;
+  }
+  if (!report.length()) {
+    if (recoverBus()) report = "stuck";  // freed: the next scan sees the modules
+    else report = "lines:" + String((GPIOD->IDR >> 12) & 3) + ":" + String(GPIOD->MODER >> 24, HEX) + ":" + String(I2C4->ISR, HEX);
+  }
+  if (report != busReport || !busReported) {
+    busReport = report;
+    busReported = true;
+    Bridge.notify("bus", busReport);
+  }
+  for (int i = knobCount - 1; i >= 0; i--) {
+    if (knobSeen[i]) continue;
+    for (int j = i; j < knobCount - 1; j++) knobs[j] = knobs[j + 1];
+    knobCount--;
     topologyDirty = true;
   }
 }
@@ -354,7 +580,20 @@ void reportTopology() {
     if (i) addrs += ",";
     addrs += String(modules[i].addr, HEX);
   }
-  Bridge.notify("topology", moduleCount, knobAddr != 0, addrs, buzzerAddr != 0, tofReady());
+  String knobAddrs;
+  for (int i = 0; i < knobCount; i++) {
+    if (i) knobAddrs += ",";
+    knobAddrs += String(knobs[i].addr, HEX);
+  }
+  String pixelsAddrs;
+  for (int i = 0; i < pixelsCount; i++) {
+    if (i) pixelsAddrs += ",";
+    pixelsAddrs += String(pixels[i].addr, HEX);
+    pixels[i].shown = 0xFF;  // force a redraw
+  }
+  // flags: 1 = buzzer, 2 = distance. Six arguments at most: more don't arrive.
+  int flags = (buzzerAddr ? 1 : 0) | (tofReady() ? 2 : 0);
+  Bridge.notify("topology", moduleCount, knobCount, addrs, flags, knobAddrs, pixelsAddrs);
   for (int i = 0; i < moduleCount; i++) modules[i].ledMask = 0xFF;  // force LED refresh
 }
 
@@ -404,48 +643,48 @@ void pollButtons(uint32_t now) {
   }
 }
 
-void pollKnob(uint32_t now) {
-  if (!knobAddr) return;
+void pollKnob(int ki, uint32_t now) {
+  KnobModule& k = knobs[ki];
   uint8_t b[3], pin = 0;
-  if (!modRead(knobAddr, b, 3, &pin)) return;
+  if (!modRead(k.addr, b, 3, &pin)) return;
   if (!knobReadOk(pin, b)) {
     badReads++;
     return;
   }
   int16_t pos = (int16_t)(b[0] | (b[1] << 8));
-  int16_t step = (int16_t)(pos - knobLast);  // int16 wrap-safe
+  int16_t step = (int16_t)(pos - k.last);  // int16 wrap-safe
   if (abs(step) > KNOB_MAX_STEP) {
     badReads++;
     return;
   }
-  knobAccum += step;
-  knobLast = pos;
+  k.accum += step;
+  k.last = pos;
 
   bool raw = b[2] != 0;
-  if (raw == knobRawLast) {
-    if (knobRawRun < 255) knobRawRun++;
+  if (raw == k.rawLast) {
+    if (k.rawRun < 255) k.rawRun++;
   } else {
-    knobRawLast = raw;
-    knobRawRun = 1;
+    k.rawLast = raw;
+    k.rawRun = 1;
   }
-  bool pressed = knobRawRun >= KNOB_STABLE_READS ? raw : knobDown;
-  if (knobAccum != 0 && now - lastKnobReport >= KNOB_REPORT_MS) {
-    Bridge.notify("knob_turn", (int)knobAccum);
-    knobAccum = 0;
-    lastKnobReport = now;
+  bool pressed = k.rawRun >= KNOB_STABLE_READS ? raw : k.down;
+  if (k.accum != 0 && now - k.lastReport >= KNOB_REPORT_MS) {
+    Bridge.notify("knob_turn", ki, (int)k.accum);
+    k.accum = 0;
+    k.lastReport = now;
   }
 
-  if (pressed && !knobDown) {
-    knobDown = true;
-    knobDownAt = now;
-    knobLongSent = false;
-  } else if (!pressed && knobDown) {
-    knobDown = false;
-    if (!knobLongSent) Bridge.notify("knob_click");
+  if (pressed && !k.down) {
+    k.down = true;
+    k.downAt = now;
+    k.longSent = false;
+  } else if (!pressed && k.down) {
+    k.down = false;
+    if (!k.longSent) Bridge.notify("knob_click", ki);
   }
-  if (knobDown && !knobLongSent && now - knobDownAt >= KNOB_LONG_MS) {
-    knobLongSent = true;
-    Bridge.notify("knob_long");
+  if (k.down && !k.longSent && now - k.downAt >= KNOB_LONG_MS) {
+    k.longSent = true;
+    Bridge.notify("knob_long", ki);
   }
 }
 
@@ -460,6 +699,35 @@ bool ledFor(uint8_t state, uint32_t now) {
     case PAD_RECORDING: return (now / 120) % 2;   // fast blink
     case PAD_ARMED: return (now / 300) % 2;       // slow blink
     default: return false;
+  }
+}
+
+// Level meter: green, then amber, then red at the top. Frames are 4 bytes per
+// LED (0xE0 | brightness, blue, green, red), as the Modulino library writes them.
+void refreshPixels() {
+  for (int i = 0; i < pixelsCount; i++) {
+    PixelsModule& px = pixels[i];
+    uint8_t lit = (px.level * PIXELS_LEDS + 127) / 255;
+    if (lit == px.shown && px.tint == px.shownTint) continue;
+    uint8_t buf[PIXELS_LEDS * 4];
+    for (int l = 0; l < PIXELS_LEDS; l++) {
+      uint8_t r = 0, g = 0, b = 0;
+      if (l < lit) {
+        if (l < 5) {  // the effect amount shifts the safe zone from green to blue
+          g = 255 - (px.tint * 195) / 255;
+          b = px.tint;
+        }
+        else if (l < 7) { r = 255; g = 120; }
+        else r = 255;
+      }
+      buf[l * 4] = 0xE0 | PIXELS_BRIGHTNESS;
+      buf[l * 4 + 1] = b;
+      buf[l * 4 + 2] = g;
+      buf[l * 4 + 3] = r;
+    }
+    modWrite(px.addr, buf, sizeof(buf));
+    px.shown = lit;
+    px.shownTint = px.tint;
   }
 }
 
@@ -481,10 +749,49 @@ void refreshLeds(uint32_t now) {
 // ---------------------------------------------------------------------------
 
 // One byte per pad, PadState values.
+// From the modules page: show which module is which. Buttons flash their LEDs,
+// Pixels flash blue; both go back to what they were showing afterwards.
+// Works on any module that answers, set up or not (e.g. on its factory address).
+void identify(int addr) {
+  uint8_t pin = 0, scratch[1];
+  if (!modRead(addr, scratch, 1, &pin)) return;
+  if (pin == PINSTRAP_BUTTONS) {
+    flashModule(addr);
+    int m = findModule(addr);
+    if (m >= 0) modules[m].ledMask = 0xFF;  // redraw the pad lights
+    return;
+  }
+  if (pin != PINSTRAP_PIXELS) return;
+  int p = findPixels(addr);
+  uint8_t buf[PIXELS_LEDS * 4];
+  for (int i = 0; i < 6; i++) {
+    for (int l = 0; l < PIXELS_LEDS; l++) {
+      // blue on every other LED, at meter brightness: no current spike
+      bool on = i % 2 == 0 && l % 2 == 0;
+      buf[l * 4] = 0xE0 | PIXELS_BRIGHTNESS;
+      buf[l * 4 + 1] = on ? 255 : 0;
+      buf[l * 4 + 2] = buf[l * 4 + 3] = 0;
+    }
+    modWrite(addr, buf, sizeof(buf));
+    delay(150);
+  }
+  if (p >= 0) pixels[p].shown = 0xFF;  // redraw the meter
+}
+
 void setStates(std::vector<uint8_t> states) {
   size_t n = min(states.size(), (size_t)MAX_PADS);
   for (size_t i = 0; i < n; i++) padStates[i] = states[i];
   for (size_t i = n; i < MAX_PADS; i++) padStates[i] = PAD_EMPTY;
+}
+
+// One byte per Pixels module (address order), 0..255 = how full the meter is,
+// then optionally one more each: how much effect is on (tints the meter).
+void setMeters(std::vector<uint8_t> levels) {
+  int n = levels.size();
+  for (int i = 0; i < pixelsCount && i < n; i++) {
+    pixels[i].level = levels[i];
+    if (pixelsCount + i < n) pixels[i].tint = levels[pixelsCount + i];
+  }
 }
 
 void setHoldMs(int ms) {
@@ -512,16 +819,43 @@ void buzz(int freq, int ms) {
 
 void rescan() {
   topologyDirty = true;
+  busReported = false;  // send it again too
   lastScan = 0;
 }
 
-// Move every Buttons module back to the factory address so they can be
-// re-enrolled one at a time (unplug all, plug back in the order you want).
+// From the web UI's module setup: move the module at `from` to `to` (0 = back
+// to its factory address). It takes effect when that module is replugged.
+void setAddress(int from, int to) {
+  uint8_t pin = 0, scratch[1];
+  bool known = modRead(from, scratch, 1, &pin);
+  sendAddress(from, to);
+  if (to && known) {
+    pendingTo = to;
+    pendingPin = pin;
+    pendingSince = millis();
+    Bridge.notify("enrol", to, (int)ENROL_REPLUG);
+  }
+  lastScan = 0;  // rescan now
+}
+
+void setAutoEnrol(bool on) {
+  if (on == autoEnrol) return;  // Linux resends it every few seconds
+  autoEnrol = on;
+  pendingTo = 0;
+}
+
+// Send every Modulino back to its factory address (Arduino's broadcast reset,
+// I2C general call 0x00), so they can be set up again one at a time: unplug
+// them all, then plug them back in, in the order you want them numbered.
 void resetAddresses() {
-  for (int i = 0; i < moduleCount; i++) changeAddress(modules[i].addr, 0);
+  sendAddress(0x00, 0);
+  pendingTo = 0;
   moduleCount = 0;
+  knobCount = 0;
+  pixelsCount = 0;
   enrolHold = true;
   topologyDirty = true;
+  Bridge.notify("enrol", 0, (int)ENROL_RESET);
 }
 
 // ---------------------------------------------------------------------------
@@ -532,8 +866,9 @@ void setup() {
   matrix.setGrayscaleBits(3);
   matrix.clear();
 
+  recoverBus();
   Wire1.begin();
-  Wire1.setClock(400000);
+  Wire1.setClock(BUS_HZ);
 
   Bridge.begin();
   // _safe variants run inside loop(), so they never race the I2C polling
@@ -541,7 +876,11 @@ void setup() {
   Bridge.provide_safe("set_hold_ms", setHoldMs);
   Bridge.provide_safe("rescan", rescan);
   Bridge.provide_safe("buzz", buzz);
+  Bridge.provide_safe("set_meters", setMeters);
   Bridge.provide_safe("reset_addresses", resetAddresses);
+  Bridge.provide_safe("set_address", setAddress);
+  Bridge.provide_safe("identify", identify);
+  Bridge.provide_safe("set_auto_enrol", setAutoEnrol);
   Bridge.provide("draw", drawFrame);
 
   memset(padStates, PAD_EMPTY, sizeof(padStates));
@@ -567,9 +906,10 @@ void loop() {
   if (now - lastPoll >= POLL_INTERVAL_MS) {
     lastPoll = now;
     pollButtons(now);
-    pollKnob(now);
+    for (int ki = 0; ki < knobCount; ki++) pollKnob(ki, now);
     pollTof(now);
     refreshLeds(now);
+    refreshPixels();
   }
 
   k_mutex_lock(&frameMutex, K_FOREVER);

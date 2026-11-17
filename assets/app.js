@@ -72,6 +72,11 @@ function renderFx() {
   $("#hand-row").hidden = !theremin;
   $(".fx").classList.toggle("bypassed", bypass);
   $("#bypass").classList.toggle("on", bypass);
+  $("#mic-mute").classList.toggle("on", !!state.settings.mic_mute);
+  $(".fx").classList.toggle("muted", !!state.settings.mic_mute);
+  const lvl = $("#mic-level");
+  if (document.activeElement !== lvl) lvl.value = state.settings.monitor_level;
+  $("#mic-level-val").textContent = Math.round(lvl.value * 100);
   const amount = $("#amount");
   if (document.activeElement !== amount) amount.value = meter.fx_amount ?? state.settings.fx_amount;
   $("#amount-val").textContent = Math.round(amount.value * 100);
@@ -82,12 +87,144 @@ $("#amount").addEventListener("input", (e) => {
   sendSettings({ fx_amount: +e.target.value });
 });
 $("#bypass").onclick = () => sendSettings({ fx_bypass: !state.settings.fx_bypass });
+$("#mic-mute").onclick = () => sendSettings({ mic_mute: !state.settings.mic_mute });
+$("#mic-level").addEventListener("input", (e) => {
+  $("#mic-level-val").textContent = Math.round(e.target.value * 100);
+  sendSettings({ monitor_level: +e.target.value });
+});
+
+// ---------------------------------------------------------------------------
+// Bluetooth panel
+// ---------------------------------------------------------------------------
+
+// Volume sliders run in dB: their position 0..1000 maps from DB_MIN up to the
+// top of the level's range, and 0 is silence. A plain linear 0..1.5 slider put
+// all the usable volume in its first few percent once the output was fixed.
+const DB_MIN = -60;
+const LEVEL_TOP = 1.5;
+const dbOf = (v) => 20 * Math.log10(v);
+const posFromLevel = (v, top = LEVEL_TOP) => (v > 0 ? Math.max(1, Math.min(1000, Math.round(((dbOf(v) - DB_MIN) / (dbOf(top) - DB_MIN)) * 1000))) : 0);
+const levelFromPos = (p, top = LEVEL_TOP) => (p > 0 ? 10 ** ((DB_MIN + (p / 1000) * (dbOf(top) - DB_MIN)) / 20) : 0);
+const fmtDb = (v) => (v > 0 && dbOf(v) > DB_MIN - 0.5 ? `${Math.round(dbOf(v))} dB` : "off");
+
+const BT_SLIDERS = [["#bt-level", "bt_level", "db"], ["#pads-level", "sample_level", "db"], ["#bt-amount", "bt_fx_amount", 100]];
+
+function renderBt() {
+  const b = state.bluetooth || {};
+  let status;
+  if (!b.available) status = "Bluetooth isn't set up on this board yet: run host/bluetooth/install.sh once (see the README).";
+  else if (!b.powered) status = "Bluetooth is <b>off</b>: the board's Bluetooth chip isn't responding, so phones can't see HUMDRUM. Restart the board to bring it back.";
+  else if (b.connected) status = `Connected to <b>${escapeHtml(b.device || "a phone")}</b>.` + (state.bt_audio ? "" : " Waiting for audio: press play on the phone.");
+  else status = b.discoverable
+    ? "Not connected. On your phone, open Bluetooth settings and connect to <b>HUMDRUM</b>."
+    : "Not connected, and hidden from new phones. Turn on <b>visible to new phones</b> to pair one.";
+  $("#bt-status").innerHTML = status;
+  $("#bt-now").hidden = !b.connected;
+  $("#bt-title").textContent = b.title || (b.playing ? "playing" : "paused");
+  $("#bt-artist").textContent = b.artist || "";
+  $("#bt-pp").innerHTML = b.playing ? "&#9208;" : "&#9654;";
+  $("#bt-visible").checked = !!b.discoverable;
+  $("#bt-visible").disabled = !b.available;
+  $("#bt-disconnect").hidden = !b.connected;
+
+  const list = $("#bt-fx-list");
+  if (list.childElementCount !== state.fx.length) {
+    list.innerHTML = "";
+    state.fx.forEach((fx, i) => {
+      const btn = document.createElement("button");
+      btn.className = "fx-btn";
+      btn.dataset.i = i;
+      btn.innerHTML = `<b>${fx.short}</b><small>${fx.name}</small>`;
+      btn.onclick = () => sendSettings({ bt_fx_index: i, bt_fx_bypass: false });
+      list.appendChild(btn);
+    });
+  }
+  [...list.children].forEach((btn) => {
+    btn.classList.toggle("active", +btn.dataset.i === state.settings.bt_fx_index);
+    btn.hidden = !state.fx[+btn.dataset.i].available;  // the theremin needs a Modulino Distance
+  });
+  $(".bt").classList.toggle("bypassed", state.settings.bt_fx_bypass);
+  $("#bt-bypass").classList.toggle("on", state.settings.bt_fx_bypass);
+  $("#bt-mute").classList.toggle("on", !!state.settings.bt_mute);
+  $(".bt").classList.toggle("muted", !!state.settings.bt_mute);
+  for (const [id, key, scale] of BT_SLIDERS) {
+    const v = state.settings[key];
+    if (document.activeElement !== $(id)) $(id).value = scale === "db" ? posFromLevel(v) : v;
+    $(id + "-val").textContent = scale === "db" ? fmtDb(v) : Math.round(v * scale);
+  }
+}
+
+const escapeHtml = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+document.querySelectorAll("[data-bt]").forEach((b) => (b.onclick = () => api("POST", `/api/bt/${b.dataset.bt}`).catch((e) => toast(e.message))));
+$("#bt-visible").onchange = (e) => api("POST", "/api/bt/discoverable", { on: e.target.checked }).catch((err) => toast(err.message));
+$("#bt-disconnect").onclick = () => api("POST", "/api/bt/disconnect").catch((e) => toast(e.message));
+$("#bt-bypass").onclick = () => sendSettings({ bt_fx_bypass: !state.settings.bt_fx_bypass });
+$("#bt-mute").onclick = () => sendSettings({ bt_mute: !state.settings.bt_mute });
+for (const [id, key, scale] of BT_SLIDERS) {
+  $(id).addEventListener("input", (e) => {
+    const v = scale === "db" ? levelFromPos(+e.target.value) : +e.target.value;
+    $(id + "-val").textContent = scale === "db" ? fmtDb(v) : Math.round(v * scale);
+    sendSettings({ [key]: v });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// sample library
+// ---------------------------------------------------------------------------
+
+let libSig = "";
+function renderLibrary() {
+  const usedOn = {};
+  state.slots.forEach((s) => s.loaded && (usedOn[s.sample] = (usedOn[s.sample] || []).concat(s.pad + 1)));
+  const sig = JSON.stringify([state.library, usedOn]);
+  if (sig === libSig) return;
+  libSig = sig;
+  for (const kind of ["uploads", "recordings"]) {
+    const wrap = $(`#lib-${kind}`);
+    wrap.innerHTML = "";
+    const items = state.library.filter((it) => it.kind === kind);
+    if (!items.length) wrap.innerHTML = `<p class="empty">${kind === "uploads" ? "Nothing uploaded yet." : "No recordings yet: hold a pad to record."}</p>`;
+    for (const it of items) {
+      const row = document.createElement("div");
+      row.className = "lib-row";
+      const pads = usedOn[it.id];
+      row.innerHTML = `
+        <button class="chip play" aria-label="preview">&#9654;</button>
+        <input class="lib-name" maxlength="40">
+        <span class="meta mono">${it.seconds}s${pads ? ` · pad ${pads.join(", ")}` : ""}</span>
+        <button class="chip warn del" aria-label="delete">&times;</button>`;
+      const name = row.querySelector(".lib-name");
+      name.value = it.name;
+      name.onchange = () => api("PATCH", `/api/library/item?id=${encodeURIComponent(it.id)}`, { name: name.value }).catch((e) => toast(e.message));
+      row.querySelector(".play").onclick = () => new Audio(`/api/library/audio?id=${encodeURIComponent(it.id)}`).play();
+      row.querySelector(".del").onclick = async () => {
+        const warn = pads ? ` It's on pad ${pads.join(", ")}, which will be emptied.` : "";
+        if (!confirm(`Delete "${it.name}" from the board?${warn}`)) return;
+        await api("DELETE", `/api/library/item?id=${encodeURIComponent(it.id)}`).catch((e) => toast(e.message));
+      };
+      wrap.appendChild(row);
+    }
+  }
+}
+
+$("#lib-upload").onclick = () => pickFile(null);
+
+// ---------------------------------------------------------------------------
+// knob and button roles
+// ---------------------------------------------------------------------------
+
 $("#stop-all").onclick = () => api("POST", "/api/system/stop_all");
 
 function renderMeter() {
   const pct = (v) => `${Math.min(100, Math.round(Math.sqrt(v || 0) * 100))}%`;
   $("#m-in").style.setProperty("--w", pct(meter.in));
-  $("#m-out").style.setProperty("--w", pct(meter.out));
+  $("#m-out").style.setProperty("--w", pct(meter.mic_out));
+  $("#m-bt-in").style.setProperty("--w", pct(meter.bt_in));
+  $("#m-play-out").style.setProperty("--w", pct(meter.play_out));
+  // the more effect a chain has on, the further its meters shift from green to blue
+  for (const [ids, fx] of [[["#m-in", "#m-out"], meter.mic_fx], [["#m-bt-in", "#m-play-out"], meter.bt_fx]])
+    for (const id of ids) $(id).style.setProperty("--fx", `${Math.round((fx || 0) * 100)}%`);
   $("#m-raw").style.setProperty("--w", pct(meter.raw));
   renderInputHelp();
   $("#m-hand").style.setProperty("--w", `${Math.round((meter.hand || 0) * 100)}%`);
@@ -99,7 +236,8 @@ function renderMeter() {
     const p = +el.dataset.pad;
     el.classList.toggle("playing", playing.has(p));
     el.classList.toggle("rec", meter.rec === p);
-    el.querySelector(".prog").style.width = meter.rec === p ? `${meter.rec_progress * 100}%` : "0";
+    const prog = el.querySelector(".prog");  // Bluetooth control tiles have none
+    if (prog) prog.style.width = meter.rec === p ? `${meter.rec_progress * 100}%` : "0";
   });
 }
 
@@ -126,33 +264,75 @@ function drawPeaks(canvas, peaks, opts = {}) {
   });
 }
 
+const BT_TILES = {
+  "bt-previous": { icon: "&#9198;", name: "previous", cmd: "previous" },
+  "bt-playpause": { icon: "&#9199;", name: "play / pause", cmd: "playpause" },
+  "bt-next": { icon: "&#9197;", name: "next", cmd: "next" },
+};
+
+// <select> of every library sample, grouped like the library panel
+function sampleSelect(current) {
+  const sel = document.createElement("select");
+  sel.className = "pad-sample";
+  sel.add(new Option("— no sound —", ""));
+  for (const [kind, label] of [["uploads", "uploads"], ["recordings", "mic recordings"]]) {
+    const items = state.library.filter((it) => it.kind === kind);
+    if (!items.length) continue;
+    const g = document.createElement("optgroup");
+    g.label = label;
+    items.forEach((it) => g.appendChild(new Option(`${it.name} (${it.seconds}s)`, it.id)));
+    sel.appendChild(g);
+  }
+  sel.value = current || "";
+  return sel;
+}
+
 function renderPads() {
   const wrap = $("#pads");
   const connected = state.pads_connected;
   const extra = state.slots.filter((s) => s.loaded && s.pad >= connected).map((s) => s.pad);
   const total = Math.max(connected, extra.length ? Math.max(...extra) + 1 : 0);
   const modules = Math.ceil(total / 3);
+  const roles = state.pad_roles || [];
+  const t = state.topology;
   $("#no-pads").hidden = connected > 0;
-  $("#topo").textContent = `${connected} pads${state.topology.knob ? " · knob" : ""}${state.topology.buzzer ? " · buzzer" : ""}${state.topology.distance ? " · distance" : ""}`;
+  const padCount = roles.filter((r) => r === "pad").length;
+  $("#topo").textContent = `${padCount} pads${t.knobs ? ` · ${t.knobs} knob${t.knobs > 1 ? "s" : ""}` : ""}${t.buzzer ? " · buzzer" : ""}${t.distance ? " · distance" : ""}${state.bluetooth?.connected ? " · bt" : ""}`;
 
   wrap.innerHTML = "";
   for (let m = 0; m < modules; m++) {
     const row = document.createElement("div");
     row.className = "module";
-    row.innerHTML = `<div class="module-label">MOD ${m + 1}</div>`;
+    const btModule = roles[m * 3] && roles[m * 3] !== "pad";
+    row.innerHTML = `<div class="module-label">MOD ${m + 1}${btModule ? " · BT" : ""}</div>`;
     for (let k = 0; k < 3; k++) {
       const p = m * 3 + k;
-      const s = slotFor(p);
-      const el = document.createElement("button");
-      el.className = "pad" + (s.loaded ? " loaded" : "") + (p >= connected ? " offline" : "");
+      const el = document.createElement("div");
       el.dataset.pad = p;
+      el.tabIndex = 0;
+      el.setAttribute("role", "button");
+      const tile = BT_TILES[roles[p]];
+      if (tile) {
+        el.className = "pad btctl";
+        el.innerHTML = `
+          <div class="top-row"><span class="no">${tile.icon}</span><span class="led"></span></div>
+          <div><div class="name">${tile.name}</div><div class="meta">bluetooth</div></div>`;
+        el.onclick = () => api("POST", `/api/bt/${tile.cmd}`).catch((e) => toast(e.message));
+        row.appendChild(el);
+        continue;
+      }
+      const s = slotFor(p);
+      el.className = "pad" + (s.loaded ? " loaded" : "") + (p >= connected ? " offline" : "");
       el.innerHTML = `
         <div class="top-row"><span class="no">${pad2(p + 1)}</span><span class="led"></span></div>
         ${s.loaded
-          ? `<canvas></canvas><div><div class="name"></div><div class="meta">${s.seconds}s · ${s.mode}${s.pitch ? ` · ${s.pitch > 0 ? "+" : ""}${s.pitch}st` : ""}</div></div>`
-          : `<div class="plus">+</div><div class="meta">${p >= connected ? "not connected" : "empty"}</div>`}
+          ? `<canvas></canvas><div><div class="meta">${s.seconds}s · ${s.mode}${s.pitch ? ` · ${s.pitch > 0 ? "+" : ""}${s.pitch}st` : ""}</div></div>`
+          : `<div class="plus">+</div><div class="meta">${p >= connected ? "not connected" : "empty: tap to upload"}</div>`}
         <div class="prog"></div>`;
-      if (s.loaded) el.querySelector(".name").textContent = s.name;
+      const sel = sampleSelect(s.loaded ? s.sample : "");
+      sel.onclick = (e) => e.stopPropagation();
+      sel.onchange = () => api("PATCH", `/api/slots/${p}`, { sample: sel.value }).catch((e) => toast(e.message));
+      el.insertBefore(sel, el.querySelector(".prog"));
       el.onclick = () => (s.loaded ? openEditor(p) : pickFile(p));
       enableDrop(el, p);
       row.appendChild(el);
@@ -182,7 +362,7 @@ function pickFile(pad) {
 }
 $("#file").addEventListener("change", (e) => {
   const f = e.target.files[0];
-  if (f && uploadTarget !== null) uploadFile(uploadTarget, f);
+  if (f) uploadFile(uploadTarget, f);
 });
 
 // Decode anything the browser can play, resample to 48 kHz mono, send as WAV.
@@ -203,10 +383,17 @@ async function uploadFile(pad, file) {
     src.start();
     const rendered = await off.startRendering();
     const wav = encodeWav(rendered.getChannelData(0));
-    toast(`uploading to pad ${pad2(pad + 1)}…`, 60000);
-    const name = file.name.replace(/\.[^.]+$/, "").slice(0, 24);
-    await api("POST", `/api/slots/${pad}`, wav, { "Content-Type": "audio/wav", "X-Slot-Name": encodeURIComponent(name) });
-    toast(`pad ${pad2(pad + 1)} loaded`);
+    const name = file.name.replace(/\.[^.]+$/, "").slice(0, 40);
+    const headers = { "Content-Type": "audio/wav", "X-Slot-Name": encodeURIComponent(name) };
+    if (pad === null) {
+      toast("adding to the library…", 60000);
+      await api("POST", "/api/library", wav, headers);
+      toast(`${name} added to the library`);
+    } else {
+      toast(`uploading to pad ${pad2(pad + 1)}…`, 60000);
+      await api("POST", `/api/slots/${pad}`, wav, headers);
+      toast(`pad ${pad2(pad + 1)} loaded`);
+    }
   } catch (e) {
     toast(`could not load: ${e.message || e}`, 4000);
   }
@@ -265,7 +452,8 @@ function updateTrim() {
   $("#trim-b").style.width = `${(1 - $("#ed-end").value) * 100}%`;
 }
 
-$("#ed-name").addEventListener("input", (e) => patchSlot(editing, { name: e.target.value }));
+const renameSample = debounce((sid, name) => api("PATCH", `/api/library/item?id=${encodeURIComponent(sid)}`, { name }).catch((e) => toast(e.message)), 400);
+$("#ed-name").addEventListener("input", (e) => renameSample(slotFor(editing).sample, e.target.value));
 $("#ed-gain").addEventListener("input", (e) => patchSlot(editing, { gain: +e.target.value }));
 $("#ed-pitch").addEventListener("input", (e) => {
   $("#ed-pitch-v").textContent = (e.target.value > 0 ? "+" : "") + e.target.value;
@@ -288,7 +476,7 @@ $("#ed-reverse").onclick = () => patchSlot(editing, { reverse: !slotFor(editing)
 $("#ed-play").onclick = () => api("POST", `/api/slots/${editing}/trigger`);
 $("#ed-replace").onclick = () => { $("#editor").close(); pickFile(editing); };
 $("#ed-clear").onclick = async () => {
-  if (!confirm(`Clear pad ${pad2(editing + 1)}?`)) return;
+  if (!confirm(`Take the sound off pad ${pad2(editing + 1)}? It stays in the library.`)) return;
   await api("DELETE", `/api/slots/${editing}`);
   $("#editor").close();
 };
@@ -306,16 +494,18 @@ $("#editor").addEventListener("close", () => (editing = null));
 // ---------------------------------------------------------------------------
 
 const SETTINGS = [
-  { key: "monitor_level", label: "mic monitor", min: 0, max: 1.5, step: 0.01, fmt: (v) => Math.round(v * 100) },
-  { key: "sample_level", label: "sample level", min: 0, max: 1.5, step: 0.01, fmt: (v) => Math.round(v * 100) },
-  { key: "master", label: "master", min: 0, max: 1.5, step: 0.01, fmt: (v) => Math.round(v * 100) },
+  { key: "master", label: "master", curve: "db", max: 1.5, fmt: fmtDb },
+  { key: "hp_gain", label: "headphone amp", min: 1, max: 20, step: 1, fmt: (v) => v },
   { key: "mic_gain_db", label: "mic gain dB", min: -12, max: 36, step: 1, fmt: (v) => v },
   { key: "gate_db", label: "noise gate dB", min: -90, max: -20, step: 1, fmt: (v) => v },
+  // set automatically when a hot mic clips the codec; 0 for the headset mic
+  { key: "mic_pad_db", label: "mic input pad dB", min: 0, max: 42, step: 6, fmt: (v) => v },
   { key: "hold_ms", label: "hold to rec ms", min: 200, max: 3000, step: 50, fmt: (v) => v },
   { key: "max_rec_s", label: "max rec s", min: 1, max: 30, step: 1, fmt: (v) => v },
   { key: "knob_step", label: "knob speed", min: 0.005, max: 0.1, step: 0.005, fmt: (v) => Math.round(v * 1000) },
   { key: "theremin_near_mm", label: "theremin near mm", min: 10, max: 300, step: 5, fmt: (v) => v },
   { key: "theremin_far_mm", label: "theremin far mm", min: 100, max: 1200, step: 10, fmt: (v) => v },
+  { key: "bt_knob_pads", label: "bt knob sets pads too", type: "toggle" },
   { key: "record_post_fx", label: "record with fx", type: "toggle" },
   { key: "rec_overwrite", label: "rec over loaded pads", type: "toggle" },
   { key: "auto_trim", label: "auto-trim silence", type: "toggle" },
@@ -330,7 +520,13 @@ function buildSettings() {
   for (const d of SETTINGS) {
     const row = document.createElement("label");
     row.className = "setting" + (d.type ? ` ${d.type}` : "");
-    row.innerHTML = `<span>${d.label}</span>`;
+    // the default is shown beside the name, and clicking it puts the setting back to it
+    row.innerHTML = `<span>${d.label} <button type="button" class="dflt" title="reset to the default"></button></span>`;
+    row.querySelector(".dflt").onclick = (e) => {
+      e.preventDefault();
+      const v = state.defaults?.[d.key];
+      if (v !== undefined) sendSettings({ [d.key]: v });
+    };
     let input;
     if (d.type === "toggle") {
       input = Object.assign(document.createElement("input"), { type: "checkbox", className: "switch" });
@@ -346,9 +542,14 @@ function buildSettings() {
       input.onchange = () => sendSettings({ [d.key]: input.value.trim() });
       row.append(input);
     } else {
-      input = Object.assign(document.createElement("input"), { type: "range", min: d.min, max: d.max, step: d.step });
+      const db = d.curve === "db";
+      input = Object.assign(document.createElement("input"), db ? { type: "range", min: 0, max: 1000, step: 1 } : { type: "range", min: d.min, max: d.max, step: d.step });
       const out = document.createElement("output");
-      input.oninput = () => { out.textContent = d.fmt(+input.value); sendSettings({ [d.key]: +input.value }); };
+      input.oninput = () => {
+        const v = db ? levelFromPos(+input.value, d.max) : +input.value;
+        out.textContent = d.fmt(v);
+        sendSettings({ [d.key]: v });
+      };
       row.append(input, out);
     }
     input.dataset.key = d.key;
@@ -362,23 +563,40 @@ function renderSettings() {
     if (!input || document.activeElement === input) continue;
     const v = state.settings[d.key];
     if (d.type === "toggle") input.checked = !!v;
-    else input.value = v;
+    else input.value = d.curve === "db" ? posFromLevel(v, d.max) : v;
     const out = input.parentElement.querySelector("output");
     if (out) out.textContent = d.fmt(v);
+    const dflt = input.closest(".setting")?.querySelector(".dflt");
+    const dv = state.defaults?.[d.key];
+    if (dflt) {
+      dflt.hidden = dv === undefined;
+      if (dv !== undefined) {
+        const shown = d.fmt ? d.fmt(dv) : d.type === "toggle" ? (dv ? "on" : "off") : dv;
+        dflt.textContent = `default ${shown}`;
+        dflt.classList.toggle("is-default", v === dv);
+      }
+    }
   }
   const t = state.topology;
   $("#diag").innerHTML = `
     <dt>modules</dt><dd>${t.modules} (${t.addrs || "none"})</dd>
-    <dt>knob</dt><dd>${t.knob ? "yes" : "no"}</dd>
+    <dt>knobs</dt><dd>${t.knobs} (${t.knob_addrs || "none"})</dd>
+    <dt>pixels</dt><dd>${t.pixels_addrs || "none"}</dd>
     <dt>buzzer</dt><dd>${t.buzzer ? "yes" : "no"}</dd>
     <dt>distance</dt><dd>${t.distance ? "yes" : "no"}</dd>
     <dt>input</dt><dd>${state.devices.input}</dd>
     <dt>output</dt><dd>${state.devices.output}</dd>
     <dt>audio blocks</dt><dd>${state.audio?.blocks ?? "?"} (mic reopened ${state.audio?.mic_reopens ?? 0}×)</dd>
+    <dt>audio load</dt><dd>${state.audio?.dsp_ms ?? "?"} ms of every ${((state.settings?.block ?? 512) / 48).toFixed(1)} ms block</dd>
+    <dt>mic clipping</dt><dd>${state.audio?.mic_clips ? `${state.audio.mic_clips} clipped blocks, codec padded ${state.settings?.mic_pad_db ?? 0} dB` : "none"}</dd>
+    <dt>limiter</dt><dd>${state.audio?.limit_db ? `turning peaks down by ${state.audio.limit_db} dB` : "idle"}</dd>
+    <dt>bluetooth buffer</dt><dd>${state.audio?.bt_fill_ms ?? 0} ms, ${state.audio?.bt_underruns ?? 0} underruns</dd>
     <dt>last audio error</dt><dd>${state.audio?.last_error || "none"}</dd>
-    <dt>bad bus reads</dt><dd>${t.bad_reads ?? 0}</dd>`;
+    <dt>bad bus reads</dt><dd>${t.bad_reads ?? 0}</dd>
+    <dt>on the bus</dt><dd>${t.bus || "?"}</dd>`;
   renderAudio();
 }
+
 
 // ---------------------------------------------------------------------------
 // audio devices and Media Carrier jacks
@@ -446,9 +664,15 @@ function renderInputHelp() {
   if (state && state.audio && state.audio.stalled) msg = "Audio has stopped: the sound card stopped taking data. Restart the app (stop and start it in App Lab).";
   else if (state && state.devices.input !== "open") msg = `Mic input: ${state.devices.input}.`;
   else if (raw <= -100) msg = "No signal at all from the mic input. Is the input device right, and the mic plugged in?";
-  else if (floor > -35) msg = `The input is noisy (noise floor ${Math.round(floor)} dB), so the noise gate is muting the mic. A 3-pole mic in the combo jack, or a loose plug, does this.`;
+  else if (floor > -35) msg = `The input is noisy (noise floor ${Math.round(floor)} dB). A 3-pole mic in the combo jack, a loose plug, or a headset mic the Media Carrier doesn't power does this.`;
   else msg = `Mic level ${raw} dB, noise floor ${Math.round(floor)} dB.`;
   $("#in-help").textContent = msg;
+  // the mic card says so too: that noise ends up in everything you hear
+  const noisy = floor > -35 && raw > -100;
+  $("#mic-warn").hidden = !noisy;
+  if (noisy) $("#mic-warn").textContent = (state && state.settings.mic_mute ? "" : "Mute the mic: ") +
+    `its input is just loud noise (noise floor ${Math.round(floor)} dB), which leaks into everything you hear. ` +
+    "Headset mics in the Media Carrier's combo jack can do this; a USB mic (settings → audio in) avoids it.";
 }
 
 const TEST_HELP = $("#test-status").innerHTML;
@@ -462,21 +686,24 @@ $("#refresh-devices").onclick = loadDevices;
 
 document.querySelectorAll("[data-sys]").forEach((b) => (b.onclick = async () => {
   const action = b.dataset.sys;
-  if (action === "reset_addresses" && !confirm("Reset all button modules to factory address? You will need to re-plug them one at a time.")) return;
   await api("POST", `/api/system/${action}`);
   toast("done");
 }));
 
 // ---------------------------------------------------------------------------
 
-let lastVersion = -1, lastPads = -1;
+let lastPadKey = "";
 function render() {
+  $("#enrol-hint").hidden = !state.enrol;
+  $("#enrol-hint").textContent = state.enrol || "";
   renderFx();
+  renderBt();
+  renderLibrary();
   renderSettings();
   // rebuilding the pad grid is the only expensive bit; skip it when nothing changed
-  const key = `${state.version}/${state.pads_connected}`;
-  if (key !== `${lastVersion}/${lastPads}`) {
-    lastVersion = state.version; lastPads = state.pads_connected;
+  const key = `${state.version}/${state.pads_connected}/${(state.pad_roles || []).join()}/${state.library.length}/${state.library.map((i) => i.name).join()}`;
+  if (key !== lastPadKey) {
+    lastPadKey = key;
     renderPads();
     if (editing !== null) fillEditor();
   }

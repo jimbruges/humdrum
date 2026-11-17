@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Humdrum Bluetooth audio for the UNO Q (run once, on the board, as root).
+#
+#   sudo ./install.sh                 # the board shows up as "HUMDRUM"
+#   sudo NAME="My Humdrum" ./install.sh
+#
+# What it sets up:
+#   * PipeWire/WirePlumber: a phone's music arrives as an input the app records
+#     (so it gets Humdrum's own Bluetooth FX and volume), instead of playing
+#     straight to the speakers
+#   * humdrum-bt, a small service that keeps the board discoverable, accepts
+#     phones without a PIN and passes play/pause/previous/next to the phone
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+NAME="${NAME:-HUMDRUM}"
+APP_DIR="${APP_DIR:-/home/arduino/ArduinoApps/humdrum}"
+SOCK="$APP_DIR/data/bt.sock"
+
+[[ $EUID -eq 0 ]] || { echo "run as root (sudo $0)"; exit 1; }
+command -v bluetoothctl >/dev/null || { echo "bluetoothctl not found (apt install bluez)"; exit 1; }
+command -v busctl >/dev/null || { echo "busctl not found"; exit 1; }
+install -d -o arduino -g arduino "$APP_DIR/data"
+
+# The app's audio (PipeWire, WirePlumber) runs in the arduino user's session.
+# Keep that session running with nobody logged in, or the board loses all
+# audio when the last login (an adb or SSH shell) closes.
+loginctl enable-linger arduino
+
+echo "==> phone audio as an input for the app"
+# WirePlumber 0.5 reads .conf files; 0.4 read .lua ones (0.5 warns about those).
+install -d /etc/wireplumber/wireplumber.conf.d
+cat > /etc/wireplumber/wireplumber.conf.d/90-humdrum-bt.conf <<CONF
+# Humdrum: incoming A2DP (a phone playing music) becomes an Audio/Source node
+# that the app records and mixes, rather than a stream sent to the speakers.
+monitor.bluez.properties = {
+  bluez5.media-source-role = input
+}
+CONF
+if wireplumber --version 2>/dev/null | grep -q "libwireplumber 0\.4"; then
+  install -d /etc/wireplumber/bluetooth.lua.d
+  cat > /etc/wireplumber/bluetooth.lua.d/90-humdrum-bt.lua <<'LUA'
+-- Humdrum: phone audio arrives as an input the app records (WirePlumber 0.4)
+bluez_monitor.properties["bluez5.media-source-role"] = "input"
+LUA
+else
+  rm -f /etc/wireplumber/bluetooth.lua.d/90-humdrum-bt.lua
+fi
+
+# The board runs headless: the arduino user's audio session never has an active
+# login seat, and WirePlumber leaves Bluetooth audio off without one.
+APP_USER_HOME=$(getent passwd arduino | cut -d: -f6)
+install -d -o arduino -g arduino "$APP_USER_HOME/.config" "$APP_USER_HOME/.config/wireplumber" \
+  "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d"
+cat > "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/80-humdrum-bt-noseat.conf" <<CONF
+# Humdrum: the board runs headless, so the arduino user never has an active
+# login seat; without this WirePlumber leaves Bluetooth audio switched off.
+wireplumber.profiles = {
+  main = {
+    monitor.bluez.seat-monitoring = disabled
+  }
+}
+CONF
+chown arduino:arduino "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/80-humdrum-bt-noseat.conf"
+# The phone's music is only for the app, which records it itself (pw-record):
+# never connect it to anything automatically, e.g. straight to the speakers.
+cat > "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/81-humdrum-bt-route.conf" <<'CONF'
+monitor.bluez.rules = [
+  {
+    matches = [ { node.name = "~bluez_input.*" } ]
+    actions = { update-props = { node.autoconnect = false } }
+  }
+]
+CONF
+chown arduino:arduino "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/81-humdrum-bt-route.conf"
+# The carrier's PCMs (hw:0,0 playback, hw:0,2 capture) pack S24_LE wrongly: the
+# DSP treats each 32-bit word as a 16-bit sample in its top half. Capture came
+# back 48 dB hot with only its low 8 bits (wrapping above 1/256 of full scale);
+# playback came out 48 dB quiet with only 8 bits left (the "hissy, compressed,
+# quiet" Bluetooth sound). Measured 2026-11-17 through hw:0,x directly. S16_LE is
+# packed correctly, so PipeWire opens both in it.
+rm -f "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/82-humdrum-mic-s16.conf"
+cat > "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/82-humdrum-s16.conf" <<'CONF'
+monitor.alsa.rules = [
+  {
+    matches = [
+      { node.name = "alsa_input.platform-sound.Headphones__Headset__source" }
+      { node.name = "alsa_output.platform-sound.Headphones__Headphones__sink" }
+    ]
+    actions = { update-props = { audio.format = "S16LE" } }
+  }
+]
+CONF
+chown arduino:arduino "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/82-humdrum-s16.conf"
+
+# The login screen (lightdm) runs its own audio session, which does own the seat
+# and would grab the phone's music before the app's session can. Keep it off Bluetooth.
+if LIGHTDM_HOME=$(getent passwd lightdm | cut -d: -f6) && [[ -n "$LIGHTDM_HOME" ]]; then
+  install -d -o lightdm -g lightdm "$LIGHTDM_HOME/.config" "$LIGHTDM_HOME/.config/wireplumber" \
+    "$LIGHTDM_HOME/.config/wireplumber/wireplumber.conf.d"
+  cat > "$LIGHTDM_HOME/.config/wireplumber/wireplumber.conf.d/90-humdrum-no-bt.conf" <<CONF
+# Humdrum: Bluetooth audio belongs to the app's session (user arduino), not the login screen
+wireplumber.profiles = {
+  main = {
+    monitor.bluez = disabled
+  }
+}
+CONF
+  chown lightdm:lightdm "$LIGHTDM_HOME/.config/wireplumber/wireplumber.conf.d/90-humdrum-no-bt.conf"
+  pkill -u lightdm -x wireplumber || true  # its user manager starts it again with the new setting
+fi
+
+echo "==> humdrum-bt service ($NAME)"
+install -d /usr/local/lib/humdrum
+install -m 0755 "$HERE/humdrum-bt.py" /usr/local/lib/humdrum/humdrum-bt.py
+sed -e "s|@NAME@|$NAME|g" -e "s|@SOCK@|$SOCK|g" "$HERE/humdrum-bt.service" > /etc/systemd/system/humdrum-bt.service
+systemctl daemon-reload
+systemctl enable --now bluetooth.service humdrum-bt.service
+systemctl restart humdrum-bt.service
+
+echo "==> restarting the audio session so the new setting is used"
+systemctl --machine=arduino@.host --user restart wireplumber.service 2>/dev/null \
+  || sudo -u arduino XDG_RUNTIME_DIR=/run/user/$(id -u arduino) systemctl --user restart wireplumber.service \
+  || echo "   (restart WirePlumber yourself, or reboot)"
+
+cat <<DONE
+
+Done. On your phone, open Bluetooth settings and connect to "$NAME".
+The app shows the phone under settings -> bluetooth once it's connected.
+DONE

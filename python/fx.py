@@ -65,6 +65,29 @@ class MovingAverageHighPass:
         return (x - mean).astype(np.float32)
 
 
+class RumbleFilter:
+    """A steep low cut for the mic, cheap enough for numpy: the input delayed by
+    half the window, minus three stacked moving averages of it (linear phase).
+    With n = 321: -26 dB at 15 Hz, -39 dB at 7 Hz, under 1 dB lost at 100 Hz,
+    10 ms of delay. The Media Carrier's headset input carries a large rumble
+    below 50 Hz that otherwise swamps everything once any gain is applied."""
+
+    def __init__(self, n: int = 321, stages: int = 3) -> None:
+        self.n, self.stages = n, stages
+        self.span = stages * (n - 1)  # samples of history each output needs
+        self.hist = np.zeros(self.span, np.float64)
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        buf = np.concatenate([self.hist, x.astype(np.float64)])
+        self.hist = buf[len(buf) - self.span:]
+        low = buf
+        for _ in range(self.stages):
+            c = np.concatenate([[0.0], np.cumsum(low)])
+            low = (c[self.n:] - c[:-self.n]) / self.n  # each pass is n - 1 shorter
+        mid = self.span // 2
+        return (buf[mid : mid + len(x)] - low).astype(np.float32)
+
+
 class DelayLine:
     """Power-of-two ring buffer addressed by absolute sample index."""
 
@@ -221,9 +244,16 @@ class Reverb(Effect):
         self.combs = [(DelayLine(int(d * scale) * 2), int(d * scale)) for d in self.COMBS]
         self.aps = [(DelayLine(int(d * scale) * 2), int(d * scale)) for d in self.ALLPASS]
         self.damp = FIR(lowpass_taps(5000, 15))
+        self._live = False  # the tank holds something
 
     def process(self, x, amount):
-        # the tank keeps running at amount 0 so the tail rings out instead of cutting
+        if amount < 0.01:
+            # at 0 the output is the dry signal alone (mix is 0), so running the tank
+            # is wasted work (about 1.2 ms a block on the A53, per instance): empty it
+            if self._live:
+                self.reset()
+            return x
+        self._live = True
         g = 0.72 + 0.24 * amount
         out = np.empty_like(x)
         for i, c in _chunks(x, self.CHUNK):
@@ -247,6 +277,7 @@ class Reverb(Effect):
         for line, _ in self.combs + self.aps:
             line.clear()
         self.damp.reset()
+        self._live = False
 
 
 class Radio(Effect):
@@ -334,27 +365,57 @@ class InputConditioner:
     fixed threshold that would still let a quiet voice through.
     """
 
-    FLOOR_BLOCKS = 200  # ~2 s of 512-sample blocks
-    FLOOR_PERCENTILE = 10
+    # The headset input's hiss varies by about 10 dB from block to block, with
+    # the odd much quieter block. A floor taken from the quietest 10% of 2 s,
+    # plus 6 dB, landed below the typical hiss and the gate stood open half the
+    # time on noise alone (measured on the board). So: the quietest 20% of 10 s,
+    # open 10 dB above it, stay open down to 4 dB lower, and hold 0.2 s so word
+    # endings aren't cut.
+    FLOOR_BLOCKS = 940  # ~10 s of 512-sample blocks
+    FLOOR_PERCENTILE = 20
+    OPEN_DB = 10.0
+    HYSTERESIS_DB = 4.0
+    HOLD_S = 0.2
     DIGITAL_SILENCE = 1e-6  # capture start-up and dropouts deliver exact zeros; not the floor
 
     def __init__(self) -> None:
         self.hp = MovingAverageHighPass(SR // 180)  # about -3 dB at 80 Hz
+        self.rumble = RumbleFilter()
         self.gate_gain = 0.0
         self.floor = 0.0  # noise floor, linear RMS after gain
         self._levels: deque[float] = deque(maxlen=self.FLOOR_BLOCKS)
+        self._hold = 0  # samples the gate stays open for after the voice drops
+
+    @property
+    def is_open(self) -> bool:
+        return self.gate_gain >= 1.0
 
     def process(self, x: np.ndarray, gain: float, gate_db: float) -> np.ndarray:
-        y = self.hp(x) * np.float32(gain)
-        rms = float(np.sqrt(np.mean(y * y)) + 1e-9)
+        y = self.hp(self.rumble(x)) * np.float32(gain)
+        # Level without the loudest 5% of samples: a voice lifts it, while the
+        # clicks and crackle a headset contact makes barely move it, so they
+        # neither open the gate nor count as the noise floor.
+        # (np.partition picks the same samples as a percentile, at a fraction of
+        # np.percentile's cost on the A53: it ran twice per block)
+        mag = np.abs(y)
+        quiet = np.partition(mag, int(0.95 * (len(mag) - 1)))[: int(0.95 * (len(mag) - 1)) + 1] if len(mag) else mag
+        rms = float(np.sqrt(np.mean(quiet * quiet)) + 1e-9) if len(quiet) else 1e-9
         # a low percentile over the last few seconds: one dead or quiet block can't drag it down
         if rms > self.DIGITAL_SILENCE:
             self._levels.append(rms)
         if len(self._levels) >= 10:
-            self.floor = float(np.percentile(self._levels, self.FLOOR_PERCENTILE))
-        threshold_db = max(gate_db, 20 * np.log10(self.floor + 1e-12) + 6)
+            levels = np.fromiter(self._levels, np.float64, len(self._levels))
+            k = int(round(self.FLOOR_PERCENTILE / 100 * (len(levels) - 1)))
+            self.floor = float(np.partition(levels, k)[k])
+        open_db = max(gate_db, 20 * np.log10(self.floor + 1e-12) + self.OPEN_DB)
+        level_db = 20 * np.log10(rms)
         # open at once, close over a few blocks; ramp inside the block so it never clicks
-        new = 1.0 if 20 * np.log10(rms) > threshold_db else self.gate_gain * 0.6
+        if level_db > open_db or (self.is_open and level_db > open_db - self.HYSTERESIS_DB):
+            new, self._hold = 1.0, int(self.HOLD_S * SR)
+        elif self._hold > 0:
+            new, self._hold = 1.0, self._hold - len(y)
+        else:
+            new = self.gate_gain * 0.6
         ramp = np.linspace(self.gate_gain, new, len(y), dtype=np.float32)
         self.gate_gain = new
         return y * ramp

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#e9e8e4">
+  <title>Humdrum modules</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <a class="logo" href="./" title="back to the instrument">H</a>
+      <div>
+        <h1>MODULES</h1>
+        <p class="sub"><a href="./">&larr; back to humdrum</a></p>
+      </div>
+    </div>
+    <div class="status">
+      <span id="conn" class="dot off" title="connection"></span>
+      <span id="count">—</span>
+    </div>
+  </header>
+
+  <div id="enrol-hint" class="hint enrol" hidden></div>
+
+  <main class="modules-main">
+    <!-- Assigned modules --------------------------------------------------->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><span class="num">01</span> what each module does</h2>
+        <button id="rescan" class="chip">rescan bus</button>
+      </div>
+      <p class="help">Modules are numbered top to bottom; use the arrows to change the order. Each Buttons module is three
+        pads, numbered in this order. <b>identify</b> flashes a Buttons module's lights or a Pixels strip,
+        and pressing, turning or waving at a module lights up its card, so you can tell which is which.</p>
+      <div id="groups"></div>
+    </section>
+
+    <!-- Live events -------------------------------------------------------->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><span class="num">02</span> live from the bus</h2>
+        <button id="clear-log" class="chip">clear</button>
+      </div>
+      <dl class="diag" id="bus-diag"></dl>
+      <ul class="setup-list strays" id="strays" hidden></ul>
+      <ol class="event-log" id="log"></ol>
+    </section>
+
+    <!-- Setup -------------------------------------------------------------->
+    <section class="panel">
+      <div class="panel-head"><h2><span class="num">03</span> setting up modules</h2></div>
+      <p class="help">A new module answers at its factory address. Add new modules <b>one at a time</b> to the end of the
+        chain: each one is given the next free address, then has to be unplugged and plugged back in once to take it.
+        The banner at the top says when.</p>
+      <label class="setup-toggle"><input type="checkbox" id="setup-on"> set up one module on its own</label>
+      <p class="help">For a module that won't show up in the chain: it may hold an address another module already has.
+        Turn this on, unplug the chain from the UNO Q and plug <b>only that module</b> into the UNO Q's Qwiic socket.
+        It shows up below whatever address it holds. <b>give free address</b> sets it up there and then (unplug it and
+        plug it back in once to make it take effect), or <b>reset</b> sends it back to its factory address so the chain
+        sets it up when you add it. Turn this off again before reconnecting the chain.</p>
+      <ul class="setup-list" id="setup-list"></ul>
+      <div class="sys-row">
+        <button id="forget" class="chip">forget old addresses</button>
+        <button id="reset-all" class="chip warn">reset all module addresses</button>
+      </div>
+      <p class="help"><b>forget old addresses</b> frees every address handed out so far except those of the modules in
+        the chain (as it was the last time it was plugged in), so they can be given out again.</p>
+      <p class="help">Sends every connected Buttons, Knob and Pixels module back to its factory address, and forgets the
+        addresses handed out so far. Then plug them back in one at a time.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="libs/socket.io.min.js"></script>
+  <script src="modules.js"></script>
+</body>
+</html>
