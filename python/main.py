@@ -30,7 +30,7 @@ import audio_ports
 import bt as btmod
 import buzzer
 import display
-from engine import Engine
+from engine import Engine, bt_fx_amount
 from fx import Theremin
 from slots import MAX_PADS, SlotBank, decode_wav
 
@@ -190,7 +190,10 @@ mcu_calls: queue.SimpleQueue = queue.SimpleQueue()  # Bridge.call is not allowed
 save_due = 0.0
 state_due = 0.0  # a state push owed to the UI (knob turns), sent at most every STATE_PUSH_S
 STATE_PUSH_S = 0.15
-banner: tuple | None = None  # temporary matrix label: (text, until, bar row value or None)
+# What the matrix shows over the home screen for a moment: (draw(now) -> frame,
+# until, priority). Turning a knob (2) always shows; the phone's own changes
+# (play/pause, a new track: 1) never cover a connect / disconnect (3).
+banner: tuple | None = None
 
 
 def fx_available() -> list[int]:
@@ -282,7 +285,6 @@ def pads_connected() -> int:
 
 def on_topology(modules: int, knobs: int, addrs: str, flags: int = 0, knob_addrs: str = "", pixels_addrs: str = "") -> None:
     """flags: 1 = Modulino Buzzer present, 2 = Modulino Distance present."""
-    global banner
     has_buzzer, has_distance = bool(int(flags) & 1), bool(int(flags) & 2)
     topology.update(modules=int(modules), knobs=int(knobs), knob_addrs=str(knob_addrs), addrs=str(addrs),
                     buzzer=bool(has_buzzer), distance=bool(has_distance), pixels_addrs=str(pixels_addrs))
@@ -298,7 +300,7 @@ def on_topology(modules: int, knobs: int, addrs: str, flags: int = 0, knob_addrs
     if not has_distance:
         on_hand(-1)
     ensure_fx_available()
-    banner = (f"{pad_count():>2}P" if modules else "NO", time.monotonic() + 1.5, None)
+    _show(f"{pad_count():>2}P" if modules else "NO", 1.5)
     mcu_calls.put(("set_hold_ms", int(settings["hold_ms"])))
     push_state()
 
@@ -457,19 +459,32 @@ def _next_fx(key: str, bypass_key: str, theremin: bool) -> None:
     _push_state_soon()
 
 
-def _show(text: str, secs: float = 0.8, bar: float | None = None) -> None:
+def _banner(draw, secs: float, priority: int = 2) -> None:
+    """Show draw(now) on the matrix for `secs`, unless something more important is up."""
     global banner
-    banner = (text, time.monotonic() + secs, bar)
+    now = time.monotonic()
+    if banner and now < banner[1] and banner[2] > priority:
+        return
+    banner = (draw, now + secs, priority)
 
 
-# what the Bluetooth controls show on the matrix
-BT_ICONS = {"previous": "<<", "next": ">>", "play": ">", "pause": "|"}
+def _show(text: str, secs: float = 1.0, bar: float | None = None) -> None:
+    _banner(lambda now: display.text(text, bar), secs)
+
+
+def _blinking(name: str):
+    return lambda now: display.event(name, blink=int(now * 4) % 2 == 0)
 
 
 def bt_command(cmd: str) -> None:
     if cmd == "playpause":
         cmd = "pause" if bluetooth.state.get("playing") else "play"
-    _show(BT_ICONS.get(cmd, "BT") if bluetooth.state.get("connected") else "NO", 1.0)
+    if bluetooth.state.get("connected"):
+        frame = display.event(cmd if cmd in display.EVENTS else "play")
+        # priority 1: the track title that follows a skip may replace it
+        _banner(lambda now: frame, 1.0, priority=1)
+    else:
+        _banner(_blinking("no_phone"), 1.5)
     threading.Thread(target=bluetooth.command, args=(cmd,), daemon=True).start()
 
 
@@ -487,19 +502,21 @@ def on_knob_turn(knob: int, delta: int = 0) -> None:
     device_event("knob", knob, "turn", int(delta))
     role, mode = knob_role(knob), knob_mode(knob)
     idx_key, amount_key, bypass_key, level_key = KNOB_KEYS[role]
+    side = "bt" if role == "bt" else "mic"
     if mode == "fx":
         _step(amount_key, int(delta), 1.0)
         settings[bypass_key] = False  # turning the effect up means you want to hear it
-        if role == "bt":
-            _show("B" + engine.bt_effects[settings[idx_key]].short[:2], bar=settings[amount_key])
+        effects = engine.effects if role == "mic" else engine.bt_effects
+        frame = display.effect(side, effects[settings[idx_key]].short, settings[amount_key])
+        _banner(lambda now: frame, 1.2)
     else:
         moved_db = _step_db(level_key, int(delta))
         if role == "bt" and settings.get("bt_knob_pads", True) and moved_db is not None:
             # the pads follow by the same number of dB, so the balance holds
             _scale_db("sample_level", moved_db)
-        # e.g. "B65": where the level sits on the knob's dB range, with a bar under it
-        pos = _db_pos(settings[level_key])
-        _show(("M" if role == "mic" else "B") + f"{min(99, round(pos * 100)):02d}", bar=pos)
+        # the channel's icon, where the level sits on the knob's dB range (0-99) and a bar
+        frame = display.volume(side, _db_pos(settings[level_key]))
+        _banner(lambda now: frame, 1.2)
 
 
 def on_knob_click(knob: int = 0) -> None:
@@ -512,19 +529,19 @@ def on_knob_click(knob: int = 0) -> None:
         action = "next_fx" if mode == "fx" else "mute"
     log.info("knob %d click (%s %s): %s", int(knob) + 1, role, mode, action)
     effects = engine.effects if role == "mic" else engine.bt_effects
-    prefix = "" if role == "mic" else "B"
-    if action == "next_fx":
-        _next_fx(idx_key, bypass_key, theremin=True)
-        # the amount carries over to the next effect; show this knob's own amount
-        # (without bar= the matrix showed the mic's fx_amount, even for the Bluetooth knob)
-        _show(prefix + effects[settings[idx_key]].short[: 3 - len(prefix)], 1.0, bar=settings[amount_key])
-    elif action == "bypass":
-        settings[bypass_key] = not settings[bypass_key]
-        _show("OFF" if settings[bypass_key] else prefix + effects[settings[idx_key]].short[: 3 - len(prefix)], 1.0, bar=settings[amount_key])
+    side = "bt" if role == "bt" else "mic"
+    if action in ("next_fx", "bypass"):
+        if action == "next_fx":
+            _next_fx(idx_key, bypass_key, theremin=True)  # the amount carries over
+        else:
+            settings[bypass_key] = not settings[bypass_key]
+        frame = display.effect(side, effects[settings[idx_key]].short, settings[amount_key], settings[bypass_key])
+        _banner(lambda now: frame, 1.2)
     elif action == "mute":
         key = "mic_mute" if role == "mic" else "bt_mute"
         settings[key] = not settings[key]
-        _show("OFF" if settings[key] else ("MIC" if role == "mic" else "BT"), 1.0, bar=settings[level_key] / LEVEL_MAX)
+        frame = display.mute(side, settings[key])
+        _banner(lambda now: frame, 1.2)
     elif action == "playpause":
         bt_command("playpause")
     save_settings_soon()
@@ -541,9 +558,44 @@ def on_knob_long(knob: int = 0) -> None:
     modes[k] = "volume" if knob_mode(k) == "fx" else "fx"
     settings["knob_modes"] = modes
     log.info("knob %d hold: now %s %s", k + 1, knob_role(k), modes[k])
-    _show("VOL" if modes[k] == "volume" else "FX", 1.2)
+    frame = display.knob_mode("bt" if knob_role(k) == "bt" else "mic", modes[k])
+    _banner(lambda now: frame, 1.2)
     save_settings_soon()
     push_state()
+
+
+def _knob_mode_for(role: str) -> str | None:
+    """What the first connected knob with this role turns now, None if there is none."""
+    for k in range(int(topology.get("knobs", 0))):
+        if knob_role(k) == role:
+            return knob_mode(k)
+    return None
+
+
+def _channels() -> tuple:
+    """The home screen's two strips: phone + pads (left), mic (right)."""
+    bts = bluetooth.state
+    if bts.get("available") and not bts.get("powered"):
+        status = "off"
+    elif not bts.get("connected"):
+        status = "idle"
+    else:
+        status = "playing" if bts.get("playing") and engine.bt_in.node else "connected"
+    hand = engine.effects[THEREMIN].hand
+
+    def fx(index_key, amount_key, bypass_key, active):
+        amount = settings[amount_key]
+        if not active(amount):
+            return None, False
+        return (hand if settings[index_key] == THEREMIN else amount), bool(settings[bypass_key])
+
+    bt_fx, bt_off = fx("bt_fx_index", "bt_fx_amount", "bt_fx_bypass", lambda a: bt_fx_amount(a) > 0)
+    mic_fx, mic_off = fx("fx_index", "fx_amount", "fx_bypass", lambda a: a >= 0.01)
+    bt = display.Channel(volume=_db_pos(settings["bt_level"]), fx=bt_fx, fx_bypassed=bt_off, muted=bool(settings["bt_mute"]),
+                         knob=_knob_mode_for("bt"), status=status, level=engine.level_play)
+    mic = display.Channel(volume=_db_pos(settings["monitor_level"]), fx=mic_fx, fx_bypassed=mic_off,
+                          muted=bool(settings["mic_mute"]), knob=_knob_mode_for("mic"), level=engine.level_mic_out)
+    return bt, mic
 
 
 def pixels_addrs() -> list[str]:
@@ -882,15 +934,35 @@ def on_mic_pad(pad_db: int) -> None:
 
 
 engine.on_mic_pad = on_mic_pad
-_bt_was_connected = False
+_bt_last: dict | None = None  # the previous Bluetooth state, to spot what changed
+CONNECT_ICON_S = 1.5
 
 
 def on_bt_change(state: dict) -> None:
-    global _bt_was_connected
-    if state["connected"] != _bt_was_connected:
-        _bt_was_connected = state["connected"]
-        _show("BT" if state["connected"] else "NO", 1.5)
+    """Show Bluetooth events on the matrix: usually nobody is looking at the web UI."""
+    global _bt_last
+    last, _bt_last = _bt_last, dict(state)
     push_state()
+    if last is None or not state.get("available"):
+        return  # first look at the helper (app start), or no helper: nothing happened
+    if last.get("powered") and not state.get("powered"):
+        _banner(_blinking("bt_off"), 4.0, priority=3)
+    elif state["connected"] and not last.get("connected"):
+        name = state.get("device") or ""
+        icon = display.event("connected")
+        _banner(lambda now, t0=time.monotonic(): icon if now - t0 < CONNECT_ICON_S else display.scroll(name, now - t0 - CONNECT_ICON_S),
+                CONNECT_ICON_S + (display.scroll_length(name) if name else 0), priority=3)
+    elif last.get("connected") and not state["connected"]:
+        _banner(_blinking("disconnected"), 3.0, priority=3)
+    elif state["connected"]:
+        title = state.get("title") or ""
+        if title and title != last.get("title"):
+            # a new track (skipped from here or on the phone): its title scrolls by
+            _banner(lambda now, t0=time.monotonic(): display.scroll(title, now - t0, icon="note"),
+                    display.scroll_length(title, "note"), priority=1)
+        elif state["playing"] != last.get("playing"):
+            frame = display.event("play" if state["playing"] else "pause")
+            _banner(lambda now: frame, 1.0, priority=1)
 
 
 bluetooth.on_change = on_bt_change
@@ -1148,7 +1220,7 @@ WAVE_HOLD_S = 0.25  # keep the waveform up briefly after the sound ends
 
 
 def loop() -> None:
-    global _last_states, _last_states_at, _last_frame, _last_meter, save_due, state_due, _wave
+    global _last_states, _last_states_at, _last_frame, _last_meter, save_due, state_due, _wave, banner
     now = time.monotonic()
 
     while not mcu_calls.empty():
@@ -1205,17 +1277,18 @@ def loop() -> None:
     wave_env = bank.slots[_wave[0]].matrix_env if _wave and now < _wave[2] else None
 
     if engine.recording_pad is not None:
-        blink = int(now * 4) % 2 == 0
-        frame = display.render("REC" if blink else "", engine.rec_progress, engine.level_in)
+        frame = display.rec(engine.rec_progress, engine.level_in, int(now * 4) % 2 == 0)
     elif banner and now < banner[1]:
-        frame = display.render(banner[0], settings["fx_amount"] if banner[2] is None else banner[2], engine.level_out)
+        try:
+            frame = banner[0](now)
+        except Exception:
+            log.exception("matrix banner")
+            banner = None
+            frame = display.home(*_channels(), now=now)
     elif wave_env:
-        frame = display.render_wave(wave_env, _wave[1], settings["fx_amount"], engine.level_out)
+        frame = display.wave(wave_env, _wave[1], *_channels())
     else:
-        fx = engine.effects[settings["fx_index"] % len(engine.effects)]
-        # the theremin swaps the level row for the hand height, so you can see what you're playing
-        row6 = engine.effects[THEREMIN].hand if settings["fx_index"] == THEREMIN else engine.level_out
-        frame = display.render(fx.short, settings["fx_amount"], row6, dim=settings["fx_bypass"])
+        frame = display.home(*_channels(), now=now)
     if frame != _last_frame:
         try:
             Bridge.notify("draw", frame)
@@ -1260,6 +1333,8 @@ def loop() -> None:
             "mic_fx": fx_tint("mic"),
             "bt_fx": fx_tint("bt"),
             "pixels": [round(b / 255, 2) for b in _pixels_logical()],
+            # what the LED matrix shows (hex, 8x13, as sent: rotated 180° for the lid)
+            "matrix": _last_frame.hex(),
         })
 
     if state_due and now > state_due:

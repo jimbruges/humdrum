@@ -7,7 +7,7 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 - **Mic in → live FX → line out.** Seven effects (pitch up, pitch down, robot, bitcrush, echo, reverb, radio). Turn the Modulino Knob for the amount, click it for the next effect, hold it for bypass.
 - **Modulino Buttons become sample pads**, 3 per module, picked up automatically as you plug them in. The LED is on when a pad holds a sample. **Hold a pad to record** from the mic into it.
 - **A Wi-Fi hotspot with a captive portal.** Scan the QR code embossed on the lid, and your phone joins and opens the web UI. There you upload samples, trim, pitch and loop them, and change settings.
-- **LED matrix display** behind a window in the lid shows the current effect, the knob amount and the output level, `REC` while recording, and the **waveform of the sample you just triggered**, filling left to right as it plays.
+- **LED matrix display** behind a window in the lid shows the two channels the knobs control (phone + pads on the left, mic on the right), everything you change, **Bluetooth events** (connect, play/pause, skip, the new track's title scrolling by), `REC` while recording, and the **waveform of the sample you just triggered**, filling left to right as it plays. See [Reading the LED matrix](#reading-the-led-matrix).
 - **Optional Modulino Buzzer** as a tone-only test speaker.
 - **Optional Modulino Distance** adds a **Theremin** effect: hand height plays your voice's pitch. It appears in the effect list only while the sensor is plugged in.
 - **Optional internal power bank bay**: a 93 × 61 × 14 mm 5000 mAh bank fits inside, its ports reachable through the right wall next to the UNO Q's USB-C.
@@ -84,11 +84,35 @@ Each newly plugged Buttons module arrives at the factory address `0x3E`. The ske
 - **To renumber**, go to web UI → settings → system → *reset button addresses*, unplug all Buttons modules, then plug them back in in the order you want.
 - Samples are stored by pad number, so they stay put when a module is unplugged and come back when it returns.
 
+### Reading the LED matrix
+
+![Every screen the LED matrix shows](docs/matrix-screens.png)
+
+The **home screen** is two strips that match the two knobs: **left = phone (Bluetooth) and sample pads, right = mic**.
+
+| Where | What it means |
+|---|---|
+| Bluetooth symbol (left) | Dim: no phone · steady: connected, paused · pulsing with the music: playing · struck through: muted · blinking and struck through: Bluetooth is off (reboot to recover) |
+| Mic (right) | Pulses with your voice while live · dim and struck through: muted |
+| Thin column next to each icon | That channel's effect amount, bottom up, only while an effect is on (very dim: set but bypassed). With the Theremin it follows your hand. |
+| Bottom row | Left half: phone + pads volume · right half: mic volume |
+| Bright vs dim | Whatever each knob is set to change (its volume or its effect) is drawn brighter |
+
+Whatever you do shows for about a second, full width:
+
+- **Volume knob:** the channel's icon, its level 0-99 and a bar.
+- **Effect knob or switching effect:** the effect's code (UP, DWN, ROB, BIT, ECO, VRB, RAD, THR) and its amount; a line down the left edge means the phone/pads effect, down the right edge the mic's. `OFF` when bypassed.
+- **Mute:** the icon with ✕ (muted) or `ON`.
+- **Holding a knob:** the icon with a speaker (now a volume knob) or `FX` (now an effect knob).
+- **Bluetooth controls** (pads or knob click): ▶ ‖ ⏭ ⏮; a blinking Bluetooth ✕ if no phone is connected.
+- **Phone connects:** Bluetooth ✓, then its name scrolls by. **Disconnects:** a blinking Bluetooth ✕.
+- **New track** (skipped here or on the phone): ♪ and its title scrolling by. **Play/pause on the phone:** ▶ or ‖.
+
 ### Pad behaviour
 
 | Action | Result |
 |---|---|
-| Tap | Plays the sample (one-shot / gate / loop, set per pad in the web UI). The LED matrix shows its waveform, bright where it has played and dim ahead, then returns to the effect display 0.25 s after it ends. Loops keep the waveform up until stopped. |
+| Tap | Plays the sample (one-shot / gate / loop, set per pad in the web UI). The LED matrix shows its waveform, bright where it has played and dim ahead, then returns to the home screen 0.25 s after it ends. Loops keep the waveform up until stopped. |
 | Hold (600 ms, adjustable) | Starts recording from the mic into that pad. LED blinks fast and the matrix shows `REC`. Release to stop. |
 | LED | Off = empty · on = loaded · flicker = playing · fast blink = recording |
 
@@ -101,7 +125,7 @@ Plug in a Modulino Distance and an eighth effect, **THR**, joins the knob cycle 
 - **Your voice** is pitch-shifted by hand height, up to an octave either way at full amount. Closer is higher, as on a real theremin, and it glides rather than jumping.
 - **An "ether" tone** (a sine with slow vibrato) follows the hand across three octaves, 110–880 Hz, at your voice's loudness. Hum to play it.
 - **The knob** sets how much of both you get; 0 is fully dry.
-- **The LED matrix** shows `THR`, and the row above the knob bar shows hand height instead of output level.
+- **The LED matrix** shows `THR` when you pick it, and on the home screen that channel's effect bar follows your hand height.
 - **Range:** *theremin near mm* (default 40) and *theremin far mm* (default 350) in settings set the distances that count as closest and farthest. Nothing in range counts as far.
 
 The sensor's ST driver (VL53L4CD, or VL53L4ED on some boards) is vendored in `sketch/src/` under its BSD licence, so App Lab can build the sketch on a board with no internet.
