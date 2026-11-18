@@ -57,6 +57,60 @@ def bt_fx_amount(amount: float) -> float:
     return max(0.0, (amount - BT_FX_DEADZONE) / (1.0 - BT_FX_DEADZONE))
 
 
+FX_XFADE = 512     # samples (about 11 ms) the old effect fades out over while the new one fades in
+FX_HISTORY = 4096  # recent input kept for priming a newly selected effect (pitch shift reads 2048 back)
+
+
+class FxChain:
+    """One effect slot in the signal path (the mic's, or one Bluetooth channel's).
+
+    Switching effects used to reset the new one and cut straight to it: the old
+    effect's output (an echo tail, a shifted pitch) stopped dead mid-wave, a click,
+    and the pitch effects then read up to 43 ms of their now-empty delay line, a
+    gap. Now the new effect is primed with the recent input and the old one keeps
+    running for FX_XFADE samples while they crossfade."""
+
+    def __init__(self, effects: list) -> None:
+        self.effects = effects
+        self.index = -1
+        self.old = None  # the effect being faded out
+        self.left = 0  # samples of crossfade still to go
+        self.hist = np.zeros(FX_HISTORY, np.float32)
+
+    def reset_all(self) -> None:
+        for fx in self.effects:
+            fx.reset()
+        self.old, self.left = None, 0
+
+    def process(self, index: int, x: np.ndarray, amount: float) -> np.ndarray:
+        index %= len(self.effects)
+        if index != self.index:
+            new = self.effects[index]
+            if 0 <= self.index < len(self.effects) and self.effects[self.index] is not new:
+                self.old, self.left = self.effects[self.index], FX_XFADE
+            new.reset()  # don't replay whatever was in its buffers last time...
+            new.prime(self.hist)  # ...but start from what's playing now, not silence
+            self.index = index
+        y = self.effects[index].process(x, amount)
+        if self.old is not None:
+            n = len(x)
+            k = min(n, self.left)
+            t = np.ones(n, np.float32)  # how far through the crossfade, 0..1
+            done = 1.0 - self.left / FX_XFADE
+            t[:k] = np.linspace(done, done + k / FX_XFADE, k, endpoint=False, dtype=np.float32)
+            # equal-power: two different signals faded linearly lose level midway
+            y = y * np.sin(0.5 * np.pi * t) + self.old.process(x, amount) * np.cos(0.5 * np.pi * t)
+            self.left -= k
+            if self.left <= 0:
+                self.old = None
+        self.hist = np.concatenate([self.hist[len(x):], x.astype(np.float32)])[-FX_HISTORY:]
+        return y
+
+    @property
+    def current(self):
+        return self.effects[self.index] if self.index >= 0 else self.effects[0]
+
+
 def _forward_min(a: np.ndarray, w: int) -> np.ndarray:
     """out[k] = a[k : k + w].min() for every full window, in O(n) (van Herk / Gil-Werman):
     each window spans at most two w-long chunks, so it's the min of a suffix of one
@@ -299,7 +353,8 @@ class Engine:
         self.effects = make_effects()
         self.bt_effects = make_effects()  # their own instances: separate buffers and settings
         self.bt_effects_r = make_effects()  # the right channel's (bt_effects is the left's)
-        self._bt_fx_last = -1
+        self.mic_fx = FxChain(self.effects)
+        self.bt_fx_l, self.bt_fx_r = FxChain(self.bt_effects), FxChain(self.bt_effects_r)
         self.bt_in = BtInput()
         self.limiter = Limiter(CHANNELS)
         self._nonfinite_seen: set[str] = set()
@@ -307,7 +362,6 @@ class Engine:
         self.events: queue.SimpleQueue = queue.SimpleQueue()
         self.voices: dict[int, Voice] = {}
         self.focus_pad: int | None = None  # last pad triggered, shown on the LED matrix
-        self._fx_last = -1
 
         self.recording_pad: int | None = None
         self.rec_chunks: list[np.ndarray] = []
@@ -547,11 +601,8 @@ class Engine:
                     self._set_mic_pad(int(s.get("mic_pad_db", 0)) - MIC_PAD_STEP_DB, "the mic has headroom")
                 self._voice_s, self._voice_peak = 0.0, 0.0
         fx_i = int(s.get("fx_index", 0)) % len(self.effects)
-        if fx_i != self._fx_last:
-            self.effects[fx_i].reset()  # don't replay whatever was in its buffers last time
-            self._fx_last = fx_i
         amount = 0.0 if s.get("fx_bypass") else float(s.get("fx_amount", 0.0))
-        wet = self._finite(self.effects[fx_i].process(dry, amount), f"mic effect {self.effects[fx_i].name}", (self.effects[fx_i],))
+        wet = self._finite(self.mic_fx.process(fx_i, dry, amount), f"mic effect {self.effects[fx_i].name}", (self.effects[fx_i],))
 
         if self.recording_pad is not None:
             take = wet if s.get("record_post_fx") else dry
@@ -567,24 +618,24 @@ class Engine:
         bt_dry = self._finite(self.bt_in.read(len(x)), "bluetooth input")  # frames x CHANNELS
         bt_i = int(s.get("bt_fx_index", 0)) % len(self.bt_effects)
         left, right = self.bt_effects[bt_i], self.bt_effects_r[bt_i]
-        if bt_i != self._bt_fx_last:
-            left.reset()
-            right.reset()
-            self._bt_fx_last = bt_i
-        if hasattr(left, "hand"):
-            right.hand = left.hand  # the Theremin's hand position is set on the left one
+        for fl, fr in zip(self.bt_effects, self.bt_effects_r):
+            if hasattr(fl, "hand"):
+                fr.hand = fl.hand  # the Theremin's hand position is set on the left one
         bt_amount = 0.0 if s.get("bt_fx_bypass") else bt_fx_amount(float(s.get("bt_fx_amount", 0.0)))
         # the Bluetooth effect plays on the phone's music and the pads together,
         # one instance per channel so the music stays stereo
         phone = 0.0 if s.get("bt_mute") else s.get("bt_level", 0.8)
-        play = np.stack([left.process(mix + bt_dry[:, 0] * phone, bt_amount),
-                         right.process(mix + bt_dry[:, 1] * phone, bt_amount)], axis=1)
+        play = np.stack([self.bt_fx_l.process(bt_i, mix + bt_dry[:, 0] * phone, bt_amount),
+                         self.bt_fx_r.process(bt_i, mix + bt_dry[:, 1] * phone, bt_amount)], axis=1)
         play = self._finite(play, f"bluetooth effect {left.name}", (left, right))
 
         master = s.get("master", 0.9)
         monitor = 0.0 if s.get("mic_mute") else s.get("monitor_level", 0.8)
-        self.level_mic_out = max(float(np.max(np.abs(wet))) * monitor * master, self.level_mic_out * 0.85)
-        self.level_play = max(float(np.max(np.abs(play))) * master, self.level_play * 0.85)
+        # The meters (Modulino Pixels, web UI) read the mix before master: master
+        # is the earphones' trim (-20 dB here), and metering after it left the
+        # Bluetooth/pads meter dark unless the knob was at full.
+        self.level_mic_out = max(float(np.max(np.abs(wet))) * monitor, self.level_mic_out * 0.85)
+        self.level_play = max(float(np.max(np.abs(play))), self.level_play * 0.85)
         out = (play + (wet * monitor)[:, None]) * master
         if self.tone_buf is not None:
             seg = self.tone_buf[self.tone_pos : self.tone_pos + len(out)]
@@ -650,8 +701,7 @@ class Engine:
             elif kind == "tone":
                 self._tone(*ev[1:])
             elif kind == "reset_fx":
-                for fx in self.effects:
-                    fx.reset()
+                self.mic_fx.reset_all()
 
     def _tone(self, freq: float = 440.0, beeps: int = 1) -> None:
         """`beeps` short beeps at `freq`: lets you tell the outputs apart by ear."""

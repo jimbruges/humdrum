@@ -27,6 +27,16 @@ install -d -o arduino -g arduino "$APP_DIR/data"
 # audio when the last login (an adb or SSH shell) closes.
 loginctl enable-linger arduino
 
+# Classic Bluetooth only. The board's WCN399x controller hangs on routine HCI
+# commands now and then and needs a reboot (four times on 2026-11-17; one was in
+# LE privacy/scan commands). Humdrum only uses classic profiles (A2DP, AVRCP),
+# so leaving LE off removes a whole class of commands it can choke on.
+if grep -qE '^\s*ControllerMode\s*=' /etc/bluetooth/main.conf; then
+  sed -i -E 's/^\s*ControllerMode\s*=.*/ControllerMode = bredr/' /etc/bluetooth/main.conf
+else
+  sed -i -E 's/^#\s*ControllerMode\s*=.*/ControllerMode = bredr/' /etc/bluetooth/main.conf
+fi
+
 echo "==> phone audio as an input for the app"
 # WirePlumber 0.5 reads .conf files; 0.4 read .lua ones (0.5 warns about those).
 install -d /etc/wireplumber/wireplumber.conf.d

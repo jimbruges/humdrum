@@ -134,6 +134,11 @@ class Effect:
     def reset(self) -> None:
         pass
 
+    def prime(self, history: np.ndarray) -> None:
+        """Called after reset() when the effect is switched in, with the most
+        recent input. Effects that read back in time fill their buffers with it,
+        so they don't start from silence (an audible gap on every switch)."""
+
 
 class PitchShift(Effect):
     """Two-tap granular delay-line shifter (the classic 'harmonizer' trick)."""
@@ -166,6 +171,9 @@ class PitchShift(Effect):
 
     def reset(self):
         self.line.clear()
+
+    def prime(self, history):
+        self.line.write(history[-self.line.mask:].astype(np.float32))
 
 
 class Robot(Effect):
@@ -286,6 +294,11 @@ class Radio(Effect):
     def __init__(self) -> None:
         self.band = FIR(bandpass_taps(450, 2600, 129))
 
+    def prime(self, history):
+        h = self.band.hist
+        if len(history) >= len(h):
+            h[:] = history[-len(h):]
+
     def process(self, x, amount):
         y = self.band(x)
         if amount < 0.01:
@@ -342,6 +355,9 @@ class Theremin(Effect):
     def reset(self):
         self.shifter.reset()
         self.env = 0.0
+
+    def prime(self, history):
+        self.shifter.prime(history)
 
 
 def make_effects() -> list[Effect]:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import logging
 import math
 import queue
@@ -160,6 +161,10 @@ def load_settings() -> dict:
 
 
 settings = load_settings()
+# Python hands the GIL between threads every 5 ms by default. The audio thread
+# needs ~7 of every 10.7 ms; behind a busy web request it fell late and the card
+# played a block of silence. At 1 ms it gets back in after any Python-heavy work.
+sys.setswitchinterval(0.001)
 bank = SlotBank(DATA)
 # The kits shipped in samples/ are always in the library; the first time, they're
 # also put on the pads (pad 1 up), so a new board plays something out of the box.
@@ -248,7 +253,7 @@ def apply_settings(changes: dict) -> dict:
     if reopen:
         engine.reopen_devices()
     save_settings_soon()
-    push_state()
+    _push_state_soon()  # coalesced: a full push per click starved the audio thread
     return settings
 
 
@@ -429,6 +434,12 @@ def _step_db(key: str, delta: int) -> float | None:
     return step_db  # into or out of silence: the click's worth
 
 
+def _push_state_soon() -> None:
+    """Push the state to the web UI within STATE_PUSH_S, once however many changes come in."""
+    global state_due
+    state_due = state_due or time.monotonic() + STATE_PUSH_S
+
+
 def _step(key: str, delta: int, hi: float, scale: float = 1.0) -> None:
     global state_due
     settings[key] = min(hi, max(0.0, settings[key] + delta * settings["knob_step"] * scale))
@@ -443,7 +454,7 @@ def _next_fx(key: str, bypass_key: str, theremin: bool) -> None:
     settings[key] = available[(pos + 1) % len(available)]
     settings[bypass_key] = False
     save_settings_soon()
-    push_state()
+    _push_state_soon()
 
 
 def _show(text: str, secs: float = 0.8, bar: float | None = None) -> None:
@@ -517,7 +528,7 @@ def on_knob_click(knob: int = 0) -> None:
     elif action == "playpause":
         bt_command("playpause")
     save_settings_soon()
-    push_state()
+    _push_state_soon()
 
 
 def on_knob_long(knob: int = 0) -> None:

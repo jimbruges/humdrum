@@ -140,6 +140,7 @@ class Slot:
     raw: np.ndarray | None = None  # the library sample
     play: np.ndarray | None = None  # trimmed, pitched, reversed, gain applied
     matrix_env: list[float] = field(default_factory=list)  # play buffer's shape, one value per matrix column
+    peaks: list[float] = field(default_factory=list)  # the sample's outline for the web UI, worked out once
 
     @property
     def loaded(self) -> bool:
@@ -193,6 +194,10 @@ class SlotBank:
         s.raw = self.library.audio(s.meta.sample) if s.meta.sample else None
         if s.raw is None:
             s.meta.sample = ""
+        # Computed here, not on every state push: across 12 multi-second samples
+        # that took ~22 ms of the GIL each time, long enough to starve the audio
+        # thread into an xrun (a 512-sample hole, heard as a click on FX switches).
+        s.peaks = peaks(s.raw, 120) if s.loaded else []
         self._render(pad)
 
     def _save_meta(self) -> None:
@@ -331,7 +336,7 @@ class SlotBank:
         if s.loaded:
             d.update(asdict(s.meta))
             d["seconds"] = round(len(s.raw) / SR, 2)
-            d["peaks"] = peaks(s.raw, 120)
+            d["peaks"] = s.peaks
         return d
 
 
