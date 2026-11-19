@@ -7,7 +7,7 @@ being processed, so those effects split the block into chunks no longer than
 their shortest delay.
 
 Each effect maps one `amount` in 0..1 (the knob) to its parameters, and
-amount == 0 is always fully dry.
+amount == 0 is fully dry. The Filter alone also goes negative (-1..0 low-pass, 0..1 high-pass).
 
 Only numpy is used: the App Lab Python image doesn't ship scipy, and a unit at a
 gig has no internet to pip-install it. Filters are short FIRs (np.convolve) or a
@@ -176,6 +176,31 @@ class PitchShift(Effect):
         self.line.write(history[-self.line.mask:].astype(np.float32))
 
 
+class Pitch(Effect):
+    """Pitch on one bipolar knob, like the Filter: 0 is off, right shifts up to an
+    octave higher, left down to an octave lower."""
+
+    name, short = "Pitch", "PIT"
+    bipolar = True
+    labels = ("DWN", "PIT", "UP")
+    DEAD = 0.06  # |amount| below this: no shift
+    MAX_SEMI = 12.0
+
+    def __init__(self) -> None:
+        self.shifter = PitchShift("Pitch", "PIT", self.MAX_SEMI)
+
+    def process(self, x, amount):
+        a = abs(amount)
+        semi = 0.0 if a <= self.DEAD else np.copysign(self.MAX_SEMI * (a - self.DEAD) / (1 - self.DEAD), amount)
+        return self.shifter.shift(x, float(semi))
+
+    def reset(self):
+        self.shifter.reset()
+
+    def prime(self, history):
+        self.shifter.prime(history)
+
+
 class Robot(Effect):
     name, short = "Robot", "ROB"
 
@@ -309,6 +334,100 @@ class Radio(Effect):
         return (x * (1 - mix) + y * mix).astype(np.float32)
 
 
+class Filter(Effect):
+    """DJ-style filter on an amount of -1..1: 0 is flat (the same knob position
+    that's "off" for every other effect, so switching to it changes nothing),
+    turning left from there sweeps a low-pass down (20 kHz -> 150 Hz), right a
+    high-pass up (20 Hz -> 6 kHz).
+
+    24 dB/octave with a slight resonance at the cutoff. numpy can't run a
+    sweepable IIR efficiently, so it's a 513-tap linear-phase FIR applied by FFT
+    (overlap-save, about 0.1 ms a block), designed once per knob position and
+    cached. That delays the signal by 5.3 ms while the effect is selected.
+    When the knob moves, the old and new filters crossfade over the block.
+
+    Bipolar like Pitch (amount below 0 allowed); main.py lets the knob
+    go negative while it's selected and puts it back to 0 when you switch away."""
+
+    name, short = "Filter", "FLT"
+    bipolar = True
+    labels = ("LP", "FLT", "HP")
+    TAPS = 513
+    DEAD = 0.06  # |amount| below this: flat
+    LP_MIN, LP_MAX = 150.0, 20000.0
+    HP_MIN, HP_MAX = 20.0, 6000.0
+    STEPS = 240  # knob positions the filter is designed for (each side)
+
+    def __init__(self) -> None:
+        self.hist = np.zeros(self.TAPS - 1, np.float32)
+        self.key = ("flat", 0)
+        self._taps: dict = {}
+        self._spec: dict = {}
+
+    def _key(self, amount: float):
+        if abs(amount) <= self.DEAD:
+            return ("flat", 0)
+        t = (min(1.0, abs(amount)) - self.DEAD) / (1.0 - self.DEAD)  # 0..1 along the sweep
+        return ("lp" if amount < 0 else "hp", max(1, min(self.STEPS, round(t * self.STEPS))))
+
+    def _design(self, key) -> np.ndarray:
+        if key in self._taps:
+            return self._taps[key]
+        kind, step = key
+        h = np.zeros(self.TAPS)
+        if kind == "flat":
+            h[self.TAPS // 2] = 1.0
+        else:
+            t = step / self.STEPS
+            if kind == "lp":
+                fc = self.LP_MAX * (self.LP_MIN / self.LP_MAX) ** t
+            else:
+                fc = self.HP_MIN * (self.HP_MAX / self.HP_MIN) ** t
+            nf = 8192
+            f = np.fft.rfftfreq(nf, 1 / SR)
+            f[0] = 1e-3
+            r = f / fc if kind == "lp" else fc / f
+            mag = 1.0 / np.sqrt(1.0 + r ** 8)  # 4th-order Butterworth-like slope
+            mag *= 1.0 + 0.35 * np.exp(-(np.log2(f / fc) / 0.3) ** 2)  # a little resonance at fc
+            if kind == "hp":
+                mag[0] = 0.0
+            impulse = np.fft.irfft(mag, nf)  # zero phase
+            half = self.TAPS // 2
+            h = np.concatenate([impulse[-half:], impulse[: half + 1]]) * np.kaiser(self.TAPS, 6.0)
+        self._taps[key] = h.astype(np.float32)
+        return self._taps[key]
+
+    def _spectrum(self, key, nfft: int) -> np.ndarray:
+        k = (key, nfft)
+        if k not in self._spec:
+            if len(self._spec) > 64:
+                self._spec.clear()
+            self._spec[k] = np.fft.rfft(self._design(key), nfft)
+        return self._spec[k]
+
+    def process(self, x, amount):
+        n = len(x)
+        buf = np.concatenate([self.hist, x.astype(np.float32)])
+        self.hist = buf[-(self.TAPS - 1):]
+        nfft = 1 << int(np.ceil(np.log2(len(buf))))
+        spec = np.fft.rfft(buf, nfft)
+        key = self._key(amount)
+        y = np.fft.irfft(spec * self._spectrum(key, nfft), nfft)[self.TAPS - 1: self.TAPS - 1 + n]
+        if key != self.key:  # the knob moved: crossfade from the previous filter
+            old = np.fft.irfft(spec * self._spectrum(self.key, nfft), nfft)[self.TAPS - 1: self.TAPS - 1 + n]
+            g = np.linspace(0.0, 1.0, n, dtype=np.float32)
+            y = old * (1 - g) + y * g
+            self.key = key
+        return y.astype(np.float32)
+
+    def reset(self):
+        self.hist[:] = 0
+
+    def prime(self, history):
+        if len(history) >= len(self.hist):
+            self.hist[:] = history[-len(self.hist):]
+
+
 class Theremin(Effect):
     """Hand height over a Modulino Distance plays your voice like a theremin.
 
@@ -362,13 +481,13 @@ class Theremin(Effect):
 
 def make_effects() -> list[Effect]:
     return [
-        PitchShift("Pitch up", "UP", 12),
-        PitchShift("Pitch down", "DWN", -12),
+        Filter(),
+        Reverb(),
+        Echo(),
+        Radio(),
         Robot(),
         Crush(),
-        Echo(),
-        Reverb(),
-        Radio(),
+        Pitch(),
         Theremin(),  # only offered while a Modulino Distance is plugged in
     ]
 

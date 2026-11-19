@@ -60,7 +60,7 @@ DATA = data_dir()
 SETTINGS_PATH = DATA / "settings.json"
 
 DEFAULTS = {
-    "fx_index": 4,
+    "fx_index": 2,
     "fx_amount": 0.34,
     "fx_bypass": False,
     "mic_gain_db": 6.0,  # the codec stays at -6 dB (audio_ports.MIC_HW_GAIN); this does the boost
@@ -84,7 +84,7 @@ DEFAULTS = {
     "carrier_outputs": ["headphones"],  # Media Carrier jacks that play
     "mic_mute": False,
     "bt_level": 0.5,
-    "bt_fx_index": 5,
+    "bt_fx_index": 1,
     "bt_fx_amount": 0.0,
     "bt_fx_bypass": False,
     "bt_mute": False,
@@ -116,6 +116,7 @@ DEFAULTS = {
     "module_setup": False,
     # the sample kits in samples/ have been laid out on the pads (done once, see load_kits)
     "kit_loaded": False,
+    "fx_version": 2,  # effect list order, see _migrate_fx
     # the modules in the chain the last time it was plugged in ("70": "pixels"),
     # so their addresses aren't given out while the chain is unplugged
     "chain_addrs": {},
@@ -139,10 +140,10 @@ BUTTON_ROLES = {"pads": "Sample pads", "bt": "Bluetooth controls (previous, play
 MAX_KNOBS = 4
 # what the web UI may change, with (min, max) for numbers
 LIMITS = {
-    "fx_index": (0, 7), "theremin_near_mm": (10, 300), "theremin_far_mm": (100, 1200), "fx_amount": (0.0, 1.0), "mic_gain_db": (-12.0, 36.0), "gate_db": (-90.0, -20.0), "mic_pad_db": (0, audio_ports.MIC_PAD_MAX_DB),
+    "fx_index": (0, 7), "theremin_near_mm": (10, 300), "theremin_far_mm": (100, 1200), "fx_amount": (-1.0, 1.0), "mic_gain_db": (-12.0, 36.0), "gate_db": (-90.0, -20.0), "mic_pad_db": (0, audio_ports.MIC_PAD_MAX_DB),
     "monitor_level": (0.0, 1.5), "sample_level": (0.0, 1.5), "master": (0.0, 1.5), "max_rec_s": (1, 30),
     "hold_ms": (200, 3000), "knob_step": (0.005, 0.1), "block": (256, 2048),
-    "hp_gain": (1, 20), "bt_level": (0.0, 1.5), "bt_fx_index": (0, 7), "bt_fx_amount": (0.0, 1.0),
+    "hp_gain": (1, 20), "bt_level": (0.0, 1.5), "bt_fx_index": (0, 7), "bt_fx_amount": (-1.0, 1.0),
 }
 DEVICE_KEYS = {"input_device", "output_device", "block"}
 
@@ -150,11 +151,34 @@ DEVICE_KEYS = {"input_device", "output_device", "block"}
 EMPTY, LOADED, RECORDING, ARMED, PLAYING = range(5)
 
 
+# Effect list version. 1 (no key): UP DWN ROB BIT ECO VRB RAD FLT THR.
+# 2: FLT VRB ECO RAD ROB BIT PIT THR, with up and down merged into one bipolar PIT.
+FX_VERSION = 2
+_FX_V1_TO_V2 = [6, 6, 4, 5, 2, 1, 3, 0, 7]
+
+
+def _migrate_fx(saved: dict) -> None:
+    """Saved effect indices from the old list point at the same effect in the new
+    one. A saved Pitch down becomes PIT turned left by the same amount."""
+    if saved.get("fx_version", 1) >= FX_VERSION:
+        return
+    for index_key, amount_key in (("fx_index", "fx_amount"), ("bt_fx_index", "bt_fx_amount")):
+        if index_key not in saved:
+            continue
+        old = int(saved[index_key]) % len(_FX_V1_TO_V2)
+        saved[index_key] = _FX_V1_TO_V2[old]
+        if old == 1 and amount_key in saved:
+            saved[amount_key] = -abs(float(saved[amount_key]))
+    saved["fx_version"] = FX_VERSION
+
+
 def load_settings() -> dict:
     s = dict(DEFAULTS)
     if SETTINGS_PATH.exists():
         try:
-            s.update({k: v for k, v in json.loads(SETTINGS_PATH.read_text()).items() if k in DEFAULTS})
+            saved = json.loads(SETTINGS_PATH.read_text())
+            _migrate_fx(saved)
+            s.update({k: v for k, v in saved.items() if k in DEFAULTS})
         except ValueError:
             pass
     return s
@@ -215,7 +239,7 @@ def save_settings_soon() -> None:
 def apply_settings(changes: dict) -> dict:
     reopen = False
     for k, v in changes.items():
-        if k not in DEFAULTS or k in ("known_modules", "module_order", "module_setup", "chain_addrs", "kit_loaded"):
+        if k not in DEFAULTS or k in ("known_modules", "module_order", "module_setup", "chain_addrs", "kit_loaded", "fx_version"):
             continue
         default = DEFAULTS[k]
         if isinstance(default, bool):
@@ -248,6 +272,8 @@ def apply_settings(changes: dict) -> dict:
                 mcu_calls.put(("set_hold_ms", int(v)))
             if k == "hp_gain":
                 audio_ports.hp_gain = int(v)
+            if k in FX_AMOUNT_KEY:
+                _clamp_fx_amount(k)
             if k == "mic_pad_db" and audio_ports.is_carrier(settings["input_device"]):
                 audio_ports.set_mic_gain(int(v))
             if k in ("carrier_outputs", "hp_gain") and audio_ports.is_carrier(settings["output_device"]):
@@ -442,9 +468,36 @@ def _push_state_soon() -> None:
     state_due = state_due or time.monotonic() + STATE_PUSH_S
 
 
-def _step(key: str, delta: int, hi: float, scale: float = 1.0) -> None:
+FX_AMOUNT_KEY = {"fx_index": "fx_amount", "bt_fx_index": "bt_fx_amount"}
+
+
+def _fx_selected(index_key: str):
+    effects = engine.effects if index_key == "fx_index" else engine.bt_effects
+    return effects[int(settings[index_key]) % len(effects)]
+
+
+def _fx_label(fx, amount: float) -> tuple[str, float]:
+    """What the matrix calls the effect and how full its bar is: a bipolar effect
+    says which way it's turned (Filter: LP / FLT / HP, Pitch: DWN / PIT / UP)."""
+    if getattr(fx, "bipolar", False):
+        left, centre, right = fx.labels
+        if abs(amount) <= fx.DEAD:
+            return centre, 0.0
+        return (left if amount < 0 else right), abs(amount)
+    return fx.short, amount
+
+
+def _clamp_fx_amount(index_key: str) -> None:
+    """Only the filter's amount goes below 0: leaving it, put the knob back to 0
+    (off) so the next effect doesn't start somewhere odd."""
+    key = FX_AMOUNT_KEY[index_key]
+    if settings[key] < 0 and not getattr(_fx_selected(index_key), "bipolar", False):
+        settings[key] = 0.0
+
+
+def _step(key: str, delta: int, hi: float, scale: float = 1.0, lo: float = 0.0) -> None:
     global state_due
-    settings[key] = min(hi, max(0.0, settings[key] + delta * settings["knob_step"] * scale))
+    settings[key] = min(hi, max(lo, settings[key] + delta * settings["knob_step"] * scale))
     save_settings_soon()
     # the web UI's sliders follow the knob; a full push per detent would flood it, so coalesce
     state_due = state_due or time.monotonic() + STATE_PUSH_S
@@ -455,6 +508,7 @@ def _next_fx(key: str, bypass_key: str, theremin: bool) -> None:
     pos = available.index(settings[key]) if settings[key] in available else -1
     settings[key] = available[(pos + 1) % len(available)]
     settings[bypass_key] = False
+    _clamp_fx_amount(key)
     save_settings_soon()
     _push_state_soon()
 
@@ -504,10 +558,10 @@ def on_knob_turn(knob: int, delta: int = 0) -> None:
     idx_key, amount_key, bypass_key, level_key = KNOB_KEYS[role]
     side = "bt" if role == "bt" else "mic"
     if mode == "fx":
-        _step(amount_key, int(delta), 1.0)
+        fx = _fx_selected(idx_key)
+        _step(amount_key, int(delta), 1.0, lo=-1.0 if getattr(fx, "bipolar", False) else 0.0)
         settings[bypass_key] = False  # turning the effect up means you want to hear it
-        effects = engine.effects if role == "mic" else engine.bt_effects
-        frame = display.effect(side, effects[settings[idx_key]].short, settings[amount_key])
+        frame = display.effect(side, *_fx_label(fx, settings[amount_key]))
         _banner(lambda now: frame, 1.2)
     else:
         moved_db = _step_db(level_key, int(delta))
@@ -535,7 +589,7 @@ def on_knob_click(knob: int = 0) -> None:
             _next_fx(idx_key, bypass_key, theremin=True)  # the amount carries over
         else:
             settings[bypass_key] = not settings[bypass_key]
-        frame = display.effect(side, effects[settings[idx_key]].short, settings[amount_key], settings[bypass_key])
+        frame = display.effect(side, *_fx_label(_fx_selected(idx_key), settings[amount_key]), settings[bypass_key])
         _banner(lambda now: frame, 1.2)
     elif action == "mute":
         key = "mic_mute" if role == "mic" else "bt_mute"
@@ -587,10 +641,14 @@ def _channels() -> tuple:
         amount = settings[amount_key]
         if not active(amount):
             return None, False
-        return (hand if settings[index_key] == THEREMIN else amount), bool(settings[bypass_key])
+        return (hand if settings[index_key] == THEREMIN else abs(amount)), bool(settings[bypass_key])
 
-    bt_fx, bt_off = fx("bt_fx_index", "bt_fx_amount", "bt_fx_bypass", lambda a: bt_fx_amount(a) > 0)
-    mic_fx, mic_off = fx("fx_index", "fx_amount", "fx_bypass", lambda a: a >= 0.01)
+    def on(index_key, test):
+        effect = engine.effects[settings[index_key] % len(engine.effects)]
+        return (lambda a: abs(a) > effect.DEAD) if getattr(effect, "bipolar", False) else test
+
+    bt_fx, bt_off = fx("bt_fx_index", "bt_fx_amount", "bt_fx_bypass", on("bt_fx_index", lambda a: bt_fx_amount(a) > 0))
+    mic_fx, mic_off = fx("fx_index", "fx_amount", "fx_bypass", on("fx_index", lambda a: a >= 0.01))
     bt = display.Channel(volume=_db_pos(settings["bt_level"]), fx=bt_fx, fx_bypassed=bt_off, muted=bool(settings["bt_mute"]),
                          knob=_knob_mode_for("bt"), status=status, level=engine.level_play)
     mic = display.Channel(volume=_db_pos(settings["monitor_level"]), fx=mic_fx, fx_bypassed=mic_off,
@@ -609,8 +667,13 @@ def pixels_role(i: int) -> str:
 
 
 def fx_tint(role: str) -> float:
+    """0..1: how much effect is on that channel (tints its Pixels meter). The
+    filter's amount goes negative (low-pass): what counts is how far it's turned."""
     idx_key, amount_key, bypass_key, _ = KNOB_KEYS[role]
-    return 0.0 if settings[bypass_key] else round(float(settings[amount_key]), 2)
+    if settings[bypass_key]:
+        return 0.0
+    _, amount = _fx_label(_fx_selected(idx_key), float(settings[amount_key]))
+    return round(min(1.0, max(0.0, amount)), 2)
 
 
 def meter_byte(level: float) -> int:
@@ -860,7 +923,7 @@ def full_state() -> dict:
     return {
         "settings": settings,
         "defaults": {k: v for k, v in DEFAULTS.items() if isinstance(v, (int, float, str))},
-        "fx": [{"name": fx.name, "short": fx.short, "available": i in fx_available()}
+        "fx": [{"name": fx.name, "short": fx.short, "available": i in fx_available(), "bipolar": bool(getattr(fx, "bipolar", False))}
                for i, fx in enumerate(engine.effects)],
         "topology": topology,
         "pads_connected": n,
@@ -1219,7 +1282,24 @@ _last_meters, _last_meters_at = b"", 0.0  # (engine block count, when it last ch
 WAVE_HOLD_S = 0.25  # keep the waveform up briefly after the sound ends
 
 
+_loop_errors = 0
+
+
 def loop() -> None:
+    """App Lab stops the whole app when its loop raises. A slip in drawing the LEDs
+    or meters (a negative effect amount once took the app down mid-song) mustn't
+    silence the instrument: log it and carry on."""
+    global _loop_errors
+    try:
+        _loop()
+    except Exception:
+        _loop_errors += 1
+        if _loop_errors <= 5 or _loop_errors % 500 == 0:
+            log.exception("main loop (error %d, carrying on)", _loop_errors)
+        time.sleep(0.05)
+
+
+def _loop() -> None:
     global _last_states, _last_states_at, _last_frame, _last_meter, save_due, state_due, _wave, banner
     now = time.monotonic()
 
@@ -1261,7 +1341,7 @@ def loop() -> None:
         order = pixels_addrs()
         roles = [pixels_role(order.index(a)) for a in physical_addrs("pixels")]
         tint = {"play": fx_tint("bt"), "mic": fx_tint("mic"), "off": 0.0}
-        meters = bytes([meter_byte(source[r]) for r in roles] + [int(tint[r] * 255) for r in roles])
+        meters = bytes([meter_byte(source[r]) for r in roles] + [int(min(1.0, max(0.0, tint[r])) * 255) for r in roles])
         if meters != _last_meters:
             try:
                 Bridge.call("set_meters", meters, timeout=1)

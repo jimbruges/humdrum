@@ -45,10 +45,21 @@ TONE_LEVEL = 0.25    # test tones play at about -12 dBFS whatever the mix levels
 # the pads and the test tones are mono and play in both channels.
 CHANNELS = 2
 # The Bluetooth effect knob's first BT_FX_DEADZONE of travel (two 0.02 clicks)
-# leaves the music dry. The pitch effects and the Theremin pitch-shift all of
+# leaves the music dry. The Pitch effect and the Theremin pitch-shift all of
 # the music at any amount above 0, so a knob nudged off zero (e.g. 0.04) made
 # a song sound rough and slightly flat without being noticed.
 BT_FX_DEADZONE = 0.05
+
+
+def _fx_amount(fx, bypassed: bool, amount: float, deadzone: bool) -> float:
+    """What the effect gets from the knob: 0 when bypassed. The bipolar Filter
+    takes the raw position (-1..1, it has its own dead zone round 0); the rest
+    are dry at 0 and, on the Bluetooth bank, start after the dead zone."""
+    if bypassed:
+        return 0.0
+    if getattr(fx, "bipolar", False):
+        return amount
+    return bt_fx_amount(amount) if deadzone else amount
 
 
 def bt_fx_amount(amount: float) -> float:
@@ -601,7 +612,7 @@ class Engine:
                     self._set_mic_pad(int(s.get("mic_pad_db", 0)) - MIC_PAD_STEP_DB, "the mic has headroom")
                 self._voice_s, self._voice_peak = 0.0, 0.0
         fx_i = int(s.get("fx_index", 0)) % len(self.effects)
-        amount = 0.0 if s.get("fx_bypass") else float(s.get("fx_amount", 0.0))
+        amount = _fx_amount(self.effects[fx_i], s.get("fx_bypass"), float(s.get("fx_amount", 0.0)), deadzone=False)
         wet = self._finite(self.mic_fx.process(fx_i, dry, amount), f"mic effect {self.effects[fx_i].name}", (self.effects[fx_i],))
 
         if self.recording_pad is not None:
@@ -621,7 +632,7 @@ class Engine:
         for fl, fr in zip(self.bt_effects, self.bt_effects_r):
             if hasattr(fl, "hand"):
                 fr.hand = fl.hand  # the Theremin's hand position is set on the left one
-        bt_amount = 0.0 if s.get("bt_fx_bypass") else bt_fx_amount(float(s.get("bt_fx_amount", 0.0)))
+        bt_amount = _fx_amount(left, s.get("bt_fx_bypass"), float(s.get("bt_fx_amount", 0.0)), deadzone=True)
         # the Bluetooth effect plays on the phone's music and the pads together,
         # one instance per channel so the music stays stereo
         phone = 0.0 if s.get("bt_mute") else s.get("bt_level", 0.8)

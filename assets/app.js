@@ -78,6 +78,7 @@ function renderFx() {
   if (document.activeElement !== lvl) lvl.value = state.settings.monitor_level;
   $("#mic-level-val").textContent = Math.round(lvl.value * 100);
   const amount = $("#amount");
+  amount.min = state.fx[idx] && state.fx[idx].bipolar ? -1 : 0;  // the filter: left LP, right HP, 0 flat
   if (document.activeElement !== amount) amount.value = meter.fx_amount ?? state.settings.fx_amount;
   $("#amount-val").textContent = Math.round(amount.value * 100);
 }
@@ -147,6 +148,8 @@ function renderBt() {
   $("#bt-bypass").classList.toggle("on", state.settings.bt_fx_bypass);
   $("#bt-mute").classList.toggle("on", !!state.settings.bt_mute);
   $(".bt").classList.toggle("muted", !!state.settings.bt_mute);
+  const btFx = state.fx[state.settings.bt_fx_index];
+  $("#bt-amount").min = btFx && btFx.bipolar ? -1 : 0;  // the filter: left LP, right HP, 0 flat
   for (const [id, key, scale] of BT_SLIDERS) {
     const v = state.settings[key];
     if (document.activeElement !== $(id)) $(id).value = scale === "db" ? posFromLevel(v) : v;

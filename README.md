@@ -4,7 +4,9 @@
 
 A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instrument-style case.
 
-- **Mic in → live FX → line out.** Seven effects (pitch up, pitch down, robot, bitcrush, echo, reverb, radio). Turn the Modulino Knob for the amount, click it for the next effect, hold it for bypass.
+- **Mic in → live FX → headphones or line out.** Seven effects: a DJ filter (flat at the knob's zero, the same "off" position as the other effects, then turn left for low-pass, right for high-pass), reverb, echo, radio, robot, bitcrush, and pitch (also off at zero: left shifts down, right shifts up, an octave each way), plus the Theremin with a Modulino Distance.
+- **Your phone's music over Bluetooth**, in stereo, through its own effects bank (the same eight, shared with the sample pads).
+- **Two Modulino Knobs**: one for the phone and pads, one for the mic. Turn for the volume or the effect amount, hold to swap between them, click for the next effect or mute.
 - **Modulino Buttons become sample pads**, 3 per module, picked up automatically as you plug them in. The LED is on when a pad holds a sample. **Hold a pad to record** from the mic into it.
 - **A Wi-Fi hotspot with a captive portal.** Scan the QR code embossed on the lid, and your phone joins and opens the web UI. There you upload samples, trim, pitch and loop them, and change settings.
 - **LED matrix display** behind a window in the lid shows the two channels the knobs control (phone + pads on the left, mic on the right), everything you change, **Bluetooth events** (connect, play/pause, skip, the new track's title scrolling by), `REC` while recording, and the **waveform of the sample you just triggered**, filling left to right as it plays. See [Reading the LED matrix](#reading-the-led-matrix).
@@ -12,31 +14,54 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 - **Optional Modulino Distance** adds a **Theremin** effect: hand height plays your voice's pitch. It appears in the effect list only while the sensor is plugged in.
 - **Optional internal power bank bay**: a 93 × 61 × 14 mm 5000 mAh bank fits inside, its ports reachable through the right wall next to the UNO Q's USB-C.
 
+<p>
+  <img src="docs/photos/humdrum-top.jpg" width="49%" alt="Humdrum from above: two Modulino Knobs, two Modulino Pixels as level meters, a Modulino Distance and six Modulino Buttons (18 pads) on the lid, with the QR code and LED matrix on the right">
+  <img src="docs/photos/humdrum-dj-table.jpg" width="49%" alt="Humdrum on a DJ table next to the mixer, pads lit and the LED matrix showing the home screen">
+</p>
+
 ![4-column case](enclosure/renders/render-4col.png)
 
 ---
 
 ## Hardware
 
+### Required
+
 | Part | Qty | Notes |
 |---|---|---|
-| Arduino UNO Q (2 GB) | 1 | |
+| Arduino UNO Q (2 GB) | 1 | Its built-in Wi-Fi runs the hotspot and its Bluetooth receives your phone's music: no extra radio needed |
 | Arduino UNO Media Carrier (ASX00083) | 1 | Stacks under the UNO Q and provides the audio jacks |
-| Modulino Knob | 1 | Fits any grid slot |
-| Modulino Buttons | 1 to 15 | 3 pads each; use as many as your case has slots |
-| Modulino Buzzer | 0 or 1 | Optional, tone-only |
-| Modulino Distance | 0 or 1 | Optional; enables the Theremin effect. Peel off the protective film! |
+| Modulino Knob | 2 | One for the phone and pads, one for the mic. Any grid slot |
+| Modulino Buttons | 1 or more | 3 pads each, up to 16 modules (48 pads) or as many as your case has slots |
 | Qwiic cables (50–100 mm) | 1 per module | Daisy-chained under the lid through the cable slots |
+| Headphones, earphones or a 3.5 mm **TRS** cable to a mixer | 1 | Line out is **mono differential**: use a balanced input |
+| Headset on a 3.5 mm **TRRS** (CTIA) plug, or a mic + headphones on a TRRS splitter | 1 | The mic is on the combo jack, with bias for an electret. A dynamic mic needs a preamp |
+| USB-C power supply, 5 V / 3 A | 1 | Or the optional power bank below |
+
+### Optional
+
+| Part | Qty | Adds |
+|---|---|---|
+| Modulino Pixels | 0–2 | Level meters: one for phone + pads, one for the mic (set in the web UI) |
+| Modulino Distance | 0 or 1 | The Theremin effect. Peel off the protective film! |
+| Modulino Buzzer | 0 or 1 | A tone-only beeper for the pads or a pitch follower |
+| Extra Modulino Buttons | 0 or 1 | Set to *Bluetooth controls* in the web UI: its three pads become previous, play/pause and next |
+| A phone (or any Bluetooth audio source) | 0 or 1 | Music over Bluetooth, in stereo, with its own effects |
+| 5000 mAh power bank, up to 93 × 61 × 14 mm, ports on a short end | 0 or 1 | Sits in the battery bay. Secure with hook-and-loop tape |
+| Short USB-C cable (bank → UNO Q, 5 V / 3 A) | 0 or 1 | Runs **outside** the case; both openings are on the right wall |
+
+Every Modulino takes one grid slot, so count the knobs and optional modules when you pick a case size (see *Enclosure*). The unit in the photos is the 3-column case with two Knobs, two Pixels, a Distance and seven Buttons modules: six of pads (18 pads) and one of Bluetooth controls.
+
+### Case hardware
+
+| Part | Qty | Notes |
+|---|---|---|
 | M3 heat-set inserts (M3 × 5.7, Ø4.0 hole) | 6 | Tray bosses |
 | M3 × 6 button-head screws | 6 | Lid; meant to be visible |
 | M3 × 6 self-tapping (thread-forming) screws | 4 per Modulino | Hold each Modulino flat on the lid |
 | Hot glue | a little | Holds the Media Carrier's bottom sockets in their cradles |
 | Clear or smoked acrylic, 33.6 × 20.6 × 1.5 mm | 1 | LED matrix window, glued into the rebate |
 | Rubber feet, Ø12 × 1+ mm | 4 | Recesses in the tray |
-| 5000 mAh power bank, 93 × 61 × 14 mm, ports on a short end | 0 or 1 | Optional; sits in the battery bay. Secure with hook-and-loop tape. |
-| Short USB-C cable (bank → UNO Q, 5 V / 3 A) | 0 or 1 | Runs **outside** the case; both openings are on the right wall |
-| 3.5 mm **TRS** cable → mixer (balanced) | 1 | Line out is **mono differential**: use a balanced input |
-| Electret / headset mic on a 3.5 mm **TRRS** (CTIA) plug | 1 | Mic input is on the combo jack with bias. A dynamic mic needs a preamp. |
 
 ### Audio jacks (Media Carrier)
 
@@ -88,6 +113,8 @@ Each newly plugged Buttons module arrives at the factory address `0x3E`. The ske
 
 ![Every screen the LED matrix shows](docs/matrix-screens.png)
 
+<img src="docs/photos/humdrum-knob.jpg" width="49%" alt="Turning a knob in effect mode: the LED matrix shows the effect code (VRB, reverb) and its amount, the Pixels module the level">
+
 The **home screen** is two strips that match the two knobs: **left = phone (Bluetooth) and sample pads, right = mic**.
 
 | Where | What it means |
@@ -101,7 +128,7 @@ The **home screen** is two strips that match the two knobs: **left = phone (Blue
 Whatever you do shows for about a second, full width:
 
 - **Volume knob:** the channel's icon, its level 0-99 and a bar.
-- **Effect knob or switching effect:** the effect's code (UP, DWN, ROB, BIT, ECO, VRB, RAD, THR) and its amount; a line down the left edge means the phone/pads effect, down the right edge the mic's. `OFF` when bypassed.
+- **Effect knob or switching effect:** the effect's code (FLT, VRB, ECO, RAD, ROB, BIT, PIT, THR) and its amount; the filter shows LP/HP and pitch DWN/UP depending on which way it's turned; a line down the left edge means the phone/pads effect, down the right edge the mic's. `OFF` when bypassed.
 - **Mute:** the icon with ✕ (muted) or `ON`.
 - **Holding a knob:** the icon with a speaker (now a volume knob) or `FX` (now an effect knob).
 - **Bluetooth controls** (pads or knob click): ▶ ‖ ⏭ ⏮; a blinking Bluetooth ✕ if no phone is connected.
@@ -139,11 +166,44 @@ The buzzer only plays a frequency for a set time on a piezo, so it can't reprodu
 
 ---
 
+### Bluetooth music
+
+Pair your phone with **HUMDRUM** (no PIN) and its music plays through Humdrum in stereo:
+
+- **The left knob is the phone's.** In volume mode it sets the Bluetooth level, in effect mode the amount of the phone + pads effect bank (all the effects, the filter included). Its first two clicks off zero are a dead zone, so a nudged knob doesn't colour the whole song.
+- **The pads follow the Bluetooth volume** by default (settings → *bt knob sets pads too*), so a sample stays at the same level against the music. Untick it to set the pads on their own in the web UI.
+- **The phone's own volume goes to full** when it connects: turning it down there, before the Bluetooth codec, makes quiet passages grainy. Use the knob instead.
+- **Controls:** a Buttons module set to *Bluetooth controls* gives previous / play-pause / next, and a knob click can be set to play/pause. The LED matrix shows each one (▶ ‖ ⏭ ⏮) and scrolls the new track's title.
+- **Connect / disconnect** shows on the matrix (Bluetooth ✓ and the phone's name, or a blinking ✕), so you don't need the web UI open.
+- **If Bluetooth stops** (the symbol blinks, struck through), reboot. The board's Bluetooth chip occasionally hangs, and only a reset brings it back.
+
+It needs the Bluetooth installer and Arduino's 7.0.14 kernel or newer; see *Deploying*.
+
+### Module roles
+
+Each module's job is set on the web UI's **modules** page (settings → *modules*), so you can rearrange the lid without touching code:
+
+- **Knobs:** *mic* or *Bluetooth + pads*, and whether it starts as a volume or an effect knob (hold it to swap).
+- **Pixels:** *Bluetooth + sample pads level*, *mic level* or off. The meters are read before the master volume, so they light up at any listening level.
+- **Buttons:** *sample pads* or *Bluetooth controls*.
+
 ## Deploying
 
 1. **App.** Copy `humdrum/` into App Lab (or onto the board under `~/ArduinoApps/`) and run it. App Lab builds the sketch. The Python side needs only numpy, which the App Lab image already has.
-2. **Audio devices.** The defaults are the Media Carrier's mic and all three of its jacks. Change them in the web UI under settings → *audio in / out* (see *The audio settings* above). *System* shows whether the devices are open, how many audio blocks have run, and the last audio error.
-3. **Hotspot + captive portal.** On the board (over SSH or `adb shell`):
+2. **Kernel.** Bluetooth audio needs Arduino's `linux-image-7.0.14-arduino1+` or newer. On the 7.0.0 kernel the serial link to the Bluetooth chip stalls the moment music starts. It needs internet, so do it before turning the hotspot on:
+   ```bash
+   sudo apt update && sudo apt install linux-image-7.0.14-arduino1+
+   ```
+   ```bash
+   sudo reboot
+   ```
+3. **Bluetooth and audio.** Run once on the board. It installs the pairing helper (`humdrum-bt`), the PipeWire/WirePlumber rules that bring the phone's music into the app (and keep the codec on 16-bit, which fixes the hissy 24-bit mode), and sets Bluetooth to classic only:
+   ```bash
+   cd humdrum/host/bluetooth && sudo ./install.sh
+   ```
+   Add `NAME="My Humdrum"` before `./install.sh` to change the name your phone sees.
+4. **Audio devices.** The defaults are the Media Carrier's mic and all three of its jacks. Change them in the web UI under settings → *audio in / out* (see *The audio settings* above). *System* shows whether the devices are open, how many audio blocks have run, and the last audio error.
+5. **Hotspot + captive portal.** On the board (over SSH or `adb shell`):
    ```bash
    cd humdrum/host/portal && sudo ./install.sh
    ```
@@ -156,16 +216,16 @@ The buzzer only plays a frequency for a set time on a piezo, so it can't reprodu
 
 ## Enclosure
 
-The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, and exposed button-head screws. The electronics strip is always on the right. It carries the LED matrix window, the engraved legend and the QR code. An **FX key** right of the window spells out the matrix's effect codes (UP pitch up, DWN pitch down, ROB robot, BIT bitcrush, ECO echo, VRB reverb, RAD radio, THR theremin). The strip is identical at every case width, so every size has it. The Modulino grid grows to the left in **columns of 4 slots** (48 × 27.5 mm pitch, so neighbouring modules sit about 2 mm apart; Ø2.6 mm pilot holes on the Modulino's 32 × 16 mm pattern). Every slot has Qwiic pass-through slots on both sides, so the cables run hidden under the lid.
+The case is a flat, Teenage-Engineering-style slab: a dark tray, a light lid, and exposed button-head screws. The electronics strip is always on the right. It carries the LED matrix window, the engraved legend and the QR code. The window has a knob legend to its right (TURN level, CLICK next FX, HOLD switch between volume and FX), and below it the pad legend (TAP play, HOLD record) and an **FX key** to the matrix's effect codes in knob order: FLT filter, VRB reverb, ECO echo, RAD radio, ROB robot, BIT bitcrush, PIT pitch, THR theremin. All the lid text is Helvetica Neue Condensed Black at 3.2 mm cap height, engraved 0.5 mm deep. Its strokes are about 0.8 mm wide, so they come out cleanly with a 0.4 mm nozzle; the first version's 2–2.2 mm regular-weight text (0.3 mm strokes) closed up on a Prusa Core One+. The strip is identical at every case width, so every size has it. The Modulino grid grows to the left in **columns of 4 slots** (48 × 27.5 mm pitch, so neighbouring modules sit about 2 mm apart; Ø2.6 mm pilot holes on the Modulino's 32 × 16 mm pattern). Every slot has Qwiic pass-through slots on both sides, so the cables run hidden under the lid.
 
-| Columns | Slots | Max pads (knob in one slot) | Case W × D × H | Fits a 256 mm bed? |
+| Columns | Slots | Max pads (two knobs) | Case W × D × H | Fits a 256 mm bed? |
 |---|---|---|---|---|
-| 1 | 4 | 9 | **140 × 124 × 31 mm** | ✅ |
-| 2 | 8 | 21 | **188 × 124 × 31 mm** | ✅ |
-| 3 | 12 | 33 | **236 × 124 × 31 mm** | ✅ |
-| 4 | 16 | 45 | **284 × 124 × 31 mm** | ❌ needs ≥ 290 mm (e.g. Prusa XL, Bambu H2D) |
+| 1 | 4 | 6 | **140 × 124 × 31 mm** | ✅ |
+| 2 | 8 | 18 | **188 × 124 × 31 mm** | ✅ |
+| 3 | 12 | 30 | **236 × 124 × 31 mm** | ✅ |
+| 4 | 16 | 42 | **284 × 124 × 31 mm** | ❌ needs ≥ 290 mm (e.g. Prusa XL, Bambu H2D) |
 
-The optional Buzzer and Distance modules each take a slot too, so subtract 3 pads for each one fitted.
+Each optional module (Pixels, Distance, Buzzer, a Bluetooth-controls Buttons) takes a slot too, so subtract 3 pads for each one fitted.
 
 Files: `enclosure/<n>col/` has the tray STL, lid STL and STEP. `enclosure/humdrum-enclosure.sc` is the master SolidCraft design: change the `cols` parameter to regenerate.
 
@@ -206,7 +266,7 @@ The renders use Arduino's 3D models (UNO Q `ABX00162-step.zip`, Media Carrier `A
 ### Printing
 
 - **Tray**: print open side up, no supports. PETG or ABS/ASA preferred; PLA is fine if the case stays out of the sun.
-- **Lid**: print **top face up** so the QR modules and engraving come out crisp. Holes and slots are vertical, so no supports needed.
+- **Lid**: print **top face up** so the QR modules and engraving come out crisp. Keep any engraved text you add at 0.6 mm stroke width or more (bold, 3 mm or taller); thinner strokes fill in. Holes and slots are vertical, so no supports needed.
 - **Modulino mounting**: each Modulino sits flat on the lid and is held by four M3 × 6 self-tapping screws through its Ø3.2 holes into Ø2.6 mm pilot holes in the lid. The screws cut their own thread in the 3 mm lid; their tips poke about 1.4 mm out underneath, clear of everything in the tray. Don't overtighten: printed threads strip easily.
 
 ### Colouring the embossed QR
