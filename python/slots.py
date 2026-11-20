@@ -22,12 +22,28 @@ from pathlib import Path
 import numpy as np
 
 SR = 48000
-MAX_PADS = 48
+# Each pad has SLOTS sounds; the BT knob's slot mode picks which one the pads play.
+# Pad p in slot n is stored as n * PADS_PER_SLOT + p, so slot 1 is pads 0-47 as
+# before multiple slots, and every older slots.json still loads into slot 1.
+PADS_PER_SLOT = 48
+SLOTS = 4
+MAX_PADS = PADS_PER_SLOT * SLOTS
 MAX_SECONDS = 30
 
 MODES = ("oneshot", "gate", "loop")
 KINDS = ("uploads", "recordings")
 MATRIX_COLS = 13  # width of the UNO Q LED matrix
+
+
+def pad_index(slot: int, pad: int) -> int:
+    """Where pad `pad` (0-based) of slot `slot` (0-based) is stored."""
+    return slot * PADS_PER_SLOT + pad
+
+
+def pad_label(index: int) -> str:
+    """"Pad 3" in slot 1, "Pad 3 S2" in the others."""
+    slot, pad = divmod(index, PADS_PER_SLOT)
+    return f"Pad {pad + 1}" + (f" S{slot + 1}" if slot else "")
 
 
 def _slug(name: str) -> str:
@@ -174,11 +190,11 @@ class SlotBank:
                 known = {k: v for k, v in m.items() if k in SlotMeta.__dataclass_fields__}
                 self.slots[pad].meta = SlotMeta(**known)
             old = self.dir / f"pad{pad:02d}.wav"
-            if old.exists() and not self.slots[pad].meta.sample:
+            if pad < PADS_PER_SLOT and old.exists() and not self.slots[pad].meta.sample:
                 # Before the library existed each pad had its own WAV: move it in.
                 try:
                     audio = decode_wav(old.read_bytes())
-                    name = self.slots[pad].meta.name or f"Pad {pad + 1}"
+                    name = self.slots[pad].meta.name or pad_label(pad)
                     kind = "recordings" if name.upper().startswith("REC") else "uploads"
                     self.slots[pad].meta.sample = self.library.add(audio, name, kind)
                     old.unlink()
@@ -265,14 +281,14 @@ class SlotBank:
                         continue
                     sid = self.library.add(decode_wav(path.read_bytes()), entry.get("name") or path.stem, "uploads")
                     self.library.mark_kit(sid, key)
-                if lay_out and pad < MAX_PADS:
+                if lay_out and pad < PADS_PER_SLOT:
                     self.assign(pad, sid, entry.get("mode", "oneshot"))
                     pad += 1
         return pad
 
     def set_audio(self, pad: int, audio: np.ndarray, name: str = "", kind: str = "uploads") -> str:
         """Add a new sound to the library and put it on `pad`."""
-        sid = self.library.add(audio, name or f"Pad {pad + 1}", kind)
+        sid = self.library.add(audio, name or pad_label(pad), kind)
         self.assign(pad, sid)
         return sid
 
@@ -332,7 +348,7 @@ class SlotBank:
 
     def describe(self, pad: int) -> dict:
         s = self.slots[pad]
-        d = {"pad": pad, "loaded": s.loaded}
+        d = {"pad": pad, "slot": pad // PADS_PER_SLOT, "loaded": s.loaded}
         if s.loaded:
             d.update(asdict(s.meta))
             d["seconds"] = round(len(s.raw) / SR, 2)

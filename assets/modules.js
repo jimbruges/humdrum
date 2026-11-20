@@ -118,6 +118,7 @@ function card(kind, m, i, items) {
     const mode = document.createElement("select");
     mode.add(new Option("now: effect", "fx"));
     mode.add(new Option("now: volume", "volume"));
+    if ((state.controls.knob_cycle?.[m.role] || []).includes("slot")) mode.add(new Option("now: pad slot", "slot"));
     mode.value = m.mode;
     mode.onchange = () => {
       const modes = [...state.settings.knob_modes];

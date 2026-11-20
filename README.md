@@ -6,8 +6,9 @@ A voice changer and sample-pad instrument for the Arduino UNO Q in a flat, instr
 
 - **Mic in → live FX → headphones or line out.** Seven effects: a DJ filter (flat at the knob's zero, the same "off" position as the other effects, then turn left for low-pass, right for high-pass), reverb, echo, radio, robot, bitcrush, and pitch (also off at zero: left shifts down, right shifts up, an octave each way), plus the Theremin with a Modulino Distance.
 - **Your phone's music over Bluetooth**, in stereo, through its own effects bank (the same eight, shared with the sample pads).
-- **Two Modulino Knobs**: one for the phone and pads, one for the mic. Turn for the volume or the effect amount, hold to swap between them, click for the next effect or mute.
+- **Two Modulino Knobs**: one for the phone and pads, one for the mic. Turn for the volume or the effect amount, hold to swap between them, click for the next effect or mute. The phone knob has a third job, the **pad slot**.
 - **Modulino Buttons become sample pads**, 3 per module, picked up automatically as you plug them in. The LED is on when a pad holds a sample. **Hold a pad to record** from the mic into it.
+- **Four slots of sounds per pad**: hold the phone knob until the matrix shows `S1`, then turn it to switch every pad to slot 1–4 (or pick the slot in the web UI). Each slot is a full set of pad sounds, so 6 Buttons modules hold 72 samples.
 - **A Wi-Fi hotspot with a captive portal.** Scan the QR code embossed on the lid, and your phone joins and opens the web UI. There you upload samples, trim, pitch and loop them, and change settings.
 - **LED matrix display** behind a window in the lid shows the two channels the knobs control (phone + pads on the left, mic on the right), everything you change, **Bluetooth events** (connect, play/pause, skip, the new track's title scrolling by), `REC` while recording, and the **waveform of the sample you just triggered**, filling left to right as it plays. See [Reading the LED matrix](#reading-the-led-matrix).
 - **Optional Modulino Buzzer** as a tone-only test speaker.
@@ -107,7 +108,7 @@ Each newly plugged Buttons module arrives at the factory address `0x3E`. The ske
 
 - **Add modules one at a time** while the unit is on, about a second apart. Two brand-new modules plugged in together would both move to the same address.
 - **To renumber**, go to web UI → settings → system → *reset button addresses*, unplug all Buttons modules, then plug them back in in the order you want.
-- Samples are stored by pad number, so they stay put when a module is unplugged and come back when it returns.
+- Samples are stored by pad number and slot, so they stay put when a module is unplugged and come back when it returns.
 
 ### Reading the LED matrix
 
@@ -123,14 +124,16 @@ The **home screen** is two strips that match the two knobs: **left = phone (Blue
 | Mic (right) | Pulses with your voice while live · dim and struck through: muted |
 | Thin column next to each icon | That channel's effect amount, bottom up, only while an effect is on (very dim: set but bypassed). With the Theremin it follows your hand. |
 | Bottom row | Left half: phone + pads volume · right half: mic volume |
-| Bright vs dim | Whatever each knob is set to change (its volume or its effect) is drawn brighter |
+| Dot in the middle column | Which slot the pads play: top = slot 1, then every other row down to slot 4. Bright while the phone knob is in slot mode |
+| Bright vs dim | Whatever each knob is set to change (its volume, its effect or the slot) is drawn brighter |
 
 Whatever you do shows for about a second, full width:
 
 - **Volume knob:** the channel's icon, its level 0-99 and a bar.
 - **Effect knob or switching effect:** the effect's code (FLT, VRB, ECO, RAD, ROB, BIT, PIT, THR) and its amount; the filter shows LP/HP and pitch DWN/UP depending on which way it's turned; a line down the left edge means the phone/pads effect, down the right edge the mic's. `OFF` when bypassed.
 - **Mute:** the icon with ✕ (muted) or `ON`.
-- **Holding a knob:** the icon with a speaker (now a volume knob) or `FX` (now an effect knob).
+- **Holding a knob:** the icon with a speaker (now a volume knob), `FX` (now an effect knob) or, on the phone knob, `S1`–`S4` (now a slot knob).
+- **Changing slot:** `S1`–`S4` with a line down the left edge, and four marks along the bottom with the current one bright.
 - **Bluetooth controls** (pads or knob click): ▶ ‖ ⏭ ⏮; a blinking Bluetooth ✕ if no phone is connected.
 - **Phone connects:** Bluetooth ✓, then its name scrolls by. **Disconnects:** a blinking Bluetooth ✕.
 - **New track** (skipped here or on the phone): ♪ and its title scrolling by. **Play/pause on the phone:** ▶ or ‖.
@@ -141,7 +144,16 @@ Whatever you do shows for about a second, full width:
 |---|---|
 | Tap | Plays the sample (one-shot / gate / loop, set per pad in the web UI). The LED matrix shows its waveform, bright where it has played and dim ahead, then returns to the home screen 0.25 s after it ends. Loops keep the waveform up until stopped. |
 | Hold (600 ms, adjustable) | Starts recording from the mic into that pad. LED blinks fast and the matrix shows `REC`. Release to stop. |
-| LED | Off = empty · on = loaded · flicker = playing · fast blink = recording |
+| LED | Off = empty · on = loaded · flicker = playing · fast blink = recording (all for the slot the pads are on) |
+
+### Slots
+
+Every pad holds **four sounds, one per slot**, and all the pads play the same slot. To change it, **hold the phone knob** until the matrix shows `S1`–`S4` (it steps effect → volume → slot), then **turn** it to go up or down a slot, or **click** for the next slot (wrapping round from 4 to 1). Hold it again to get back to the effect. The web UI's pads panel has S1–S4 tabs too, which switch the hardware as well; the number on each tab is how many pads in that slot have a sound.
+
+- A pad pressed before you switch keeps playing its sound, and its release (gate mode) and hold (record) still go to it. So a loop started in slot 1 carries on in slot 2; switch back to stop it.
+- Hold a pad to record into the current slot. Recordings are named after the pad and the slot (`Pad 3 S2 · …`).
+- In the pad editor, *move / swap* lists the pads of every slot, so a sound can go to another slot.
+- Sounds from before slots existed are all in slot 1.
 
 Recordings are auto-trimmed and normalised (both can be switched off), and can be recorded dry or with FX. *Rec over loaded pads* can be turned off to protect your samples.
 
@@ -183,7 +195,7 @@ It needs the Bluetooth installer and Arduino's 7.0.14 kernel or newer; see *Depl
 
 Each module's job is set on the web UI's **modules** page (settings → *modules*), so you can rearrange the lid without touching code:
 
-- **Knobs:** *mic* or *Bluetooth + pads*, and whether it starts as a volume or an effect knob (hold it to swap).
+- **Knobs:** *mic* or *Bluetooth + pads*, and whether it's on its volume, its effect or (Bluetooth knob) the pad slot (hold it to step through them).
 - **Pixels:** *Bluetooth + sample pads level*, *mic level* or off. The meters are read before the master volume, so they light up at any listening level.
 - **Buttons:** *sample pads* or *Bluetooth controls*.
 

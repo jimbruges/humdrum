@@ -160,8 +160,10 @@ Both banks have the same effects. With two Modulino Knobs, one drives the phone 
 pads, the other the mic:
 
 - **Turn** a knob to set its volume, or its effect amount when it's in effect mode.
-- **Hold** it to swap between volume and effect.
-- **Click** it for the next effect (in effect mode) or to mute (in volume mode).
+- **Hold** it to swap between volume and effect. The phone knob has a third mode,
+  the pad slot (see *The pads*).
+- **Click** it for the next effect (in effect mode), to mute (in volume mode) or for
+  the next slot (in slot mode).
 
 The amount stays put when you change effect. On the phone bank the first two clicks
 are a dead zone, so a knob nudged off zero doesn't pitch-shift your whole song.
@@ -184,10 +186,11 @@ The idle screen is two strips that match the two knobs: the phone and pads on th
 left, the mic on the right. The Bluetooth symbol is dim with no phone, steady when
 connected and pulses with the music; the mic pulses with your voice; both get struck
 through when muted. A thin column next to each shows its effect amount, the bottom
-row both volumes, and whatever each knob is set to change is drawn brighter.
+row both volumes, a dot in the middle column which pad slot is playing, and whatever
+each knob is set to change is drawn brighter.
 
 Everything you do shows for a second, full width: the volume (icon, 0–99 and a bar),
-the effect and its amount, mute, knob mode, and the Bluetooth controls. When a phone
+the effect and its amount, mute, knob mode, the pad slot, and the Bluetooth controls. When a phone
 connects you get a tick and its name scrolls by; when you skip a track, its title
 does. Two Modulino Pixels show the levels of the two channels.
 
@@ -202,6 +205,13 @@ does. Two Modulino Pixels show the levels of the two channels.
 When you tap a pad, the LED matrix draws the sample's waveform and fills it in left
 to right as it plays.
 
+Each pad holds **four sounds, one per slot**. Hold the phone knob until the matrix
+shows `S1`, then turn it to move all the pads to slot 2, 3 or 4; clicking steps to the
+next slot. The matrix shows `S2` with four marks along the bottom, and the web UI has
+matching S1–S4 tabs. Six Buttons modules give 18 pads, so 72 sounds without plugging
+in anything else. A pad you're holding, or a loop you started, keeps its sound when
+you change slot, so you can start a loop in one slot and play over it from another.
+
 [PHOTO: close-up of the LED matrix showing a waveform while a pad plays]
 
 Recordings are trimmed and normalised automatically. My first recordings with nothing
@@ -211,7 +221,7 @@ clearly above the measured noise floor or the pad keeps its old sample.
 New Buttons modules all arrive at the same I²C address, `0x3E`. The sketch moves each
 new one to the next free address (stored in the module's own flash) and blinks it
 three times to confirm. Pads are numbered in the order you first plug modules in, and
-samples stay with their pad number when a module is unplugged.
+samples stay with their pad number (and slot) when a module is unplugged.
 
 ### Theremin with a Modulino Distance
 

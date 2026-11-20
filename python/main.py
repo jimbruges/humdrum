@@ -32,7 +32,7 @@ import buzzer
 import display
 from engine import Engine, bt_fx_amount
 from fx import Theremin
-from slots import MAX_PADS, SlotBank, decode_wav
+from slots import MAX_PADS, PADS_PER_SLOT, SLOTS, SlotBank, decode_wav, pad_index, pad_label
 
 try:
     # the App Lab runtime only prints loggers it has configured itself
@@ -99,6 +99,7 @@ DEFAULTS = {
     # What each knob controls, by knob number (plug-in order), and whether it's
     # currently on the effect or the volume (a long press swaps)
     "knob_roles": ["bt", "mic", "mic", "bt"],
+    # ("slot", only on a Bluetooth knob: which slot of sounds the pads play)
     "knob_modes": ["fx", "volume", "fx", "fx"],
     # what clicking each knob does (KNOB_CLICKS)
     "knob_clicks": ["auto", "auto", "auto", "auto"],
@@ -117,6 +118,8 @@ DEFAULTS = {
     # the sample kits in samples/ have been laid out on the pads (done once, see load_kits)
     "kit_loaded": False,
     "fx_version": 2,  # effect list order, see _migrate_fx
+    # which of the SLOTS sounds each pad plays (0-based); the BT knob's slot mode picks it
+    "pad_slot": 0,
     # the modules in the chain the last time it was plugged in ("70": "pixels"),
     # so their addresses aren't given out while the chain is unplugged
     "chain_addrs": {},
@@ -126,9 +129,11 @@ KNOB_ROLES = {
     "mic": "Mic: FX or volume",
     "bt": "Bluetooth + pads FX, or phone volume",
 }
-KNOB_MODES = ("fx", "volume")
+KNOB_MODES = ("fx", "volume", "slot")
+# what a long press steps through, by knob role
+KNOB_CYCLE = {"mic": ("fx", "volume"), "bt": ("fx", "volume", "slot")}
 KNOB_CLICKS = {
-    "auto": "click: next effect (FX) / mute (volume)",
+    "auto": "click: next effect (FX) / mute (volume) / next slot (slot)",
     "next_fx": "click: next effect",
     "bypass": "click: effect on/off",
     "mute": "click: mute",
@@ -144,6 +149,7 @@ LIMITS = {
     "monitor_level": (0.0, 1.5), "sample_level": (0.0, 1.5), "master": (0.0, 1.5), "max_rec_s": (1, 30),
     "hold_ms": (200, 3000), "knob_step": (0.005, 0.1), "block": (256, 2048),
     "hp_gain": (1, 20), "bt_level": (0.0, 1.5), "bt_fx_index": (0, 7), "bt_fx_amount": (-1.0, 1.0),
+    "pad_slot": (0, SLOTS - 1),
 }
 DEVICE_KEYS = {"input_device", "output_device", "block"}
 
@@ -278,6 +284,8 @@ def apply_settings(changes: dict) -> dict:
                 audio_ports.set_mic_gain(int(v))
             if k in ("carrier_outputs", "hp_gain") and audio_ports.is_carrier(settings["output_device"]):
                 audio_ports.apply_ports(settings["carrier_outputs"])
+            if k == "pad_slot":
+                _show_slot()  # picked in the web UI: show it on the matrix too
     ensure_fx_available()
     if reopen:
         engine.reopen_devices()
@@ -376,6 +384,13 @@ def pad_count() -> int:
 
 
 BT_BUTTONS = ("previous", "playpause", "next")
+# The stored pad each button pressed now went to, so its release and hold reach
+# the same sound even if the slot changes while it's held.
+_pressed: dict[int, int] = {}
+
+
+def pad_slot() -> int:
+    return int(settings["pad_slot"]) % SLOTS
 
 
 def on_pad_down(pad: int) -> None:
@@ -384,7 +399,8 @@ def on_pad_down(pad: int) -> None:
     if module_role(pad // 3) == "bt":
         bt_command(BT_BUTTONS[pad % 3])
         return
-    engine.post("down", pad)
+    _pressed[pad] = pad_index(pad_slot(), pad)
+    engine.post("down", _pressed[pad])
     if topology["buzzer"] and settings["buzzer_mode"] == "pads":
         mcu_calls.put(("buzz", buzzer.pad_freq(pad), 120))
 
@@ -393,7 +409,7 @@ def on_pad_up(pad: int, held_ms: int = 0) -> None:
     pad = logical_pad(int(pad))
     device_event("buttons", pad // 3, "up", pad % 3)
     if module_role(pad // 3) == "pads":
-        engine.post("up", pad)
+        engine.post("up", _pressed.pop(pad, pad_index(pad_slot(), pad)))
 
 
 def on_pad_hold(pad: int) -> None:
@@ -401,8 +417,9 @@ def on_pad_hold(pad: int) -> None:
     device_event("buttons", pad // 3, "hold", pad % 3)
     if module_role(pad // 3) != "pads":
         return
-    log.info("pad %d held: recording", pad + 1)
-    engine.post("hold", pad)
+    stored = _pressed.get(pad, pad_index(pad_slot(), pad))
+    log.info("pad %d (slot %d) held: recording", pad + 1, stored // PADS_PER_SLOT + 1)
+    engine.post("hold", stored)
 
 
 def knob_role(knob: int) -> str:
@@ -412,7 +429,8 @@ def knob_role(knob: int) -> str:
 
 def knob_mode(knob: int) -> str:
     modes = settings["knob_modes"]
-    return modes[knob] if 0 <= knob < len(modes) else "fx"
+    mode = modes[knob] if 0 <= knob < len(modes) else "fx"
+    return mode if mode in KNOB_CYCLE[knob_role(knob)] else "fx"  # slot mode is the Bluetooth knob's
 
 
 def knob_click(knob: int) -> str:
@@ -526,6 +544,21 @@ def _show(text: str, secs: float = 1.0, bar: float | None = None) -> None:
     _banner(lambda now: display.text(text, bar), secs)
 
 
+def _show_slot(secs: float = 1.2) -> None:
+    frame = display.slot(pad_slot(), SLOTS)
+    _banner(lambda now: frame, secs)
+
+
+def _set_slot(slot: int) -> None:
+    slot = min(max(int(slot), 0), SLOTS - 1)
+    if slot != settings["pad_slot"]:
+        settings["pad_slot"] = slot
+        log.info("pads now on slot %d", slot + 1)
+        save_settings_soon()
+        _push_state_soon()
+    _show_slot()
+
+
 def _blinking(name: str):
     return lambda now: display.event(name, blink=int(now * 4) % 2 == 0)
 
@@ -557,7 +590,9 @@ def on_knob_turn(knob: int, delta: int = 0) -> None:
     role, mode = knob_role(knob), knob_mode(knob)
     idx_key, amount_key, bypass_key, level_key = KNOB_KEYS[role]
     side = "bt" if role == "bt" else "mic"
-    if mode == "fx":
+    if mode == "slot":
+        _set_slot(pad_slot() + (1 if int(delta) > 0 else -1 if int(delta) < 0 else 0))
+    elif mode == "fx":
         fx = _fx_selected(idx_key)
         _step(amount_key, int(delta), 1.0, lo=-1.0 if getattr(fx, "bipolar", False) else 0.0)
         settings[bypass_key] = False  # turning the effect up means you want to hear it
@@ -580,7 +615,7 @@ def on_knob_click(knob: int = 0) -> None:
     idx_key, amount_key, bypass_key, level_key = KNOB_KEYS[role]
     action = knob_click(knob)
     if action == "auto":
-        action = "next_fx" if mode == "fx" else "mute"
+        action = {"fx": "next_fx", "volume": "mute", "slot": "next_slot"}[mode]
     log.info("knob %d click (%s %s): %s", int(knob) + 1, role, mode, action)
     effects = engine.effects if role == "mic" else engine.bt_effects
     side = "bt" if role == "bt" else "mic"
@@ -596,6 +631,8 @@ def on_knob_click(knob: int = 0) -> None:
         settings[key] = not settings[key]
         frame = display.mute(side, settings[key])
         _banner(lambda now: frame, 1.2)
+    elif action == "next_slot":
+        _set_slot((pad_slot() + 1) % SLOTS)
     elif action == "playpause":
         bt_command("playpause")
     save_settings_soon()
@@ -603,16 +640,17 @@ def on_knob_click(knob: int = 0) -> None:
 
 
 def on_knob_long(knob: int = 0) -> None:
-    """Swap the knob between its effect and its volume."""
+    """Step the knob to its next job: effect, volume and, on the Bluetooth knob, slot."""
     k = logical_index("knob", int(knob))
     device_event("knob", k, "long")
     modes = list(settings["knob_modes"])
     while len(modes) <= k:
         modes.append("fx")
-    modes[k] = "volume" if knob_mode(k) == "fx" else "fx"
+    cycle = KNOB_CYCLE[knob_role(k)]
+    modes[k] = cycle[(cycle.index(knob_mode(k)) + 1) % len(cycle)]
     settings["knob_modes"] = modes
     log.info("knob %d hold: now %s %s", k + 1, knob_role(k), modes[k])
-    frame = display.knob_mode("bt" if knob_role(k) == "bt" else "mic", modes[k])
+    frame = display.knob_mode("bt" if knob_role(k) == "bt" else "mic", modes[k], pad_slot())
     _banner(lambda now: frame, 1.2)
     save_settings_soon()
     push_state()
@@ -650,7 +688,7 @@ def _channels() -> tuple:
     bt_fx, bt_off = fx("bt_fx_index", "bt_fx_amount", "bt_fx_bypass", on("bt_fx_index", lambda a: bt_fx_amount(a) > 0))
     mic_fx, mic_off = fx("fx_index", "fx_amount", "fx_bypass", on("fx_index", lambda a: a >= 0.01))
     bt = display.Channel(volume=_db_pos(settings["bt_level"]), fx=bt_fx, fx_bypassed=bt_off, muted=bool(settings["bt_mute"]),
-                         knob=_knob_mode_for("bt"), status=status, level=engine.level_play)
+                         knob=_knob_mode_for("bt"), status=status, level=engine.level_play, slot=pad_slot(), slots=SLOTS)
     mic = display.Channel(volume=_db_pos(settings["monitor_level"]), fx=mic_fx, fx_bypassed=mic_off,
                           muted=bool(settings["mic_mute"]), knob=_knob_mode_for("mic"), level=engine.level_mic_out)
     return bt, mic
@@ -927,12 +965,15 @@ def full_state() -> dict:
                for i, fx in enumerate(engine.effects)],
         "topology": topology,
         "pads_connected": n,
+        "pads_per_slot": PADS_PER_SLOT,
+        "slot_count": SLOTS,
         # per pad: "pad", or the Bluetooth control it is
         "pad_roles": [("pad" if roles[p // 3] == "pads" else f"bt-{BT_BUTTONS[p % 3]}") for p in range(n)],
         "controls": {
             "knobs": [{"knob": k, "addr": a, "role": knob_role(k), "mode": knob_mode(k), "click": knob_click(k)}
                       for k, a in enumerate(ordered_addrs("knob"))],
             "knob_clicks": KNOB_CLICKS,
+            "knob_cycle": KNOB_CYCLE,
             "pixels": [{"index": i, "addr": a, "role": pixels_role(i)} for i, a in enumerate(pixels_addrs())],
             "pixels_roles": PIXELS_ROLES,
             "modules": [{"module": m, "addr": a, "role": roles[m], "pads": [m * 3 + 1, m * 3 + 3]} for m, a in enumerate(module_addrs())],
@@ -944,7 +985,8 @@ def full_state() -> dict:
         "setup": setup_state(),
         "bluetooth": bluetooth.state,
         "bt_audio": bool(engine.bt_in.node),
-        "slots": [bank.describe(p) for p in range(MAX_PADS) if p < n or bank.slots[p].loaded],
+        # every slot's pads: the connected ones, and any other with a sound on it
+        "slots": [bank.describe(p) for p in range(MAX_PADS) if p % PADS_PER_SLOT < n or bank.slots[p].loaded],
         "devices": engine.device_status,
         "audio": {"carrier": audio_ports.is_carrier(settings["output_device"]), **engine.stats,
                   "bt_underruns": engine.bt_in.underruns, "bt_fill_ms": engine.bt_in.fill_ms},
@@ -963,9 +1005,11 @@ def push_state() -> None:
 
 
 def pad_states() -> bytes:
-    out = bytearray(MAX_PADS)
+    """Each button's LED, for the slot the pads are on."""
+    out = bytearray(PADS_PER_SLOT)
     bts = bluetooth.state
-    for p in range(MAX_PADS):
+    base = pad_index(pad_slot(), 0)
+    for p in range(PADS_PER_SLOT):
         if p // 3 < topology["modules"] and module_role(p // 3) == "bt":
             # previous/next light while a phone is connected; play/pause flashes while it plays
             if not bts["connected"]:
@@ -974,11 +1018,11 @@ def pad_states() -> bytes:
                 out[p] = ARMED if bts["playing"] else LOADED
             else:
                 out[p] = LOADED
-        elif engine.recording_pad == p:
+        elif engine.recording_pad == base + p:
             out[p] = RECORDING
-        elif p in engine.playing:
+        elif base + p in engine.playing:
             out[p] = PLAYING
-        elif bank.slots[p].loaded:
+        elif bank.slots[base + p].loaded:
             out[p] = LOADED
     return bytes(out)
 
@@ -1095,7 +1139,7 @@ async def api_slot_audio(pad: int):
     data = bank.wav_bytes(pad) if _pad_ok(pad) else None
     if data is None:
         return JSONResponse({"error": "empty pad"}, status_code=404)
-    name = bank.slots[pad].meta.name or f"pad{pad + 1}"
+    name = bank.slots[pad].meta.name or pad_label(pad).replace(" ", "-").lower()
     return Response(data, media_type="audio/wav", headers={"Content-Disposition": f'attachment; filename="{name}.wav"'})
 
 

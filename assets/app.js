@@ -43,6 +43,12 @@ function toast(msg, ms = 2200) {
 
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const pad2 = (n) => String(n).padStart(2, "0");
+// Pads are stored per slot: pad p of slot n is n * pads_per_slot + p (slot 1 = 0..47).
+const PPS = () => state?.pads_per_slot || 48;
+const curSlot = () => state?.settings?.pad_slot || 0;
+const padNo = (i) => pad2((i % PPS()) + 1);
+// "03" in slot 1... "03 S2" in the others, for messages and lists
+const padLabel = (i) => `${padNo(i)}${Math.floor(i / PPS()) ? ` S${Math.floor(i / PPS()) + 1}` : ""}`;
 
 // ---------------------------------------------------------------------------
 // FX panel
@@ -179,7 +185,7 @@ for (const [id, key, scale] of BT_SLIDERS) {
 let libSig = "";
 function renderLibrary() {
   const usedOn = {};
-  state.slots.forEach((s) => s.loaded && (usedOn[s.sample] = (usedOn[s.sample] || []).concat(s.pad + 1)));
+  state.slots.forEach((s) => s.loaded && (usedOn[s.sample] = (usedOn[s.sample] || []).concat(padLabel(s.pad))));
   const sig = JSON.stringify([state.library, usedOn]);
   if (sig === libSig) return;
   libSig = sig;
@@ -290,10 +296,42 @@ function sampleSelect(current) {
   return sel;
 }
 
+function renderSlotTabs() {
+  const tabs = $("#slot-tabs");
+  const n = state.slot_count || 1;
+  tabs.style.setProperty("--n", n);
+  tabs.parentElement.hidden = n < 2;
+  if (tabs.children.length !== n) {
+    tabs.innerHTML = "";
+    for (let i = 0; i < n; i++) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("role", "tab");
+      b.onclick = () => {
+        state.settings.pad_slot = i;  // show it straight away; the board confirms
+        renderSlotTabs();
+        renderPads();
+        sendSettings({ pad_slot: i });
+      };
+      tabs.appendChild(b);
+    }
+  }
+  const pps = PPS();
+  [...tabs.children].forEach((b, i) => {
+    const used = state.slots.filter((s) => s.loaded && Math.floor(s.pad / pps) === i).length;
+    b.innerHTML = `S${i + 1}<small>${used || ""}</small>`;
+    b.title = `slot ${i + 1}: ${used} pad${used === 1 ? "" : "s"} with a sound`;
+    b.classList.toggle("on", i === curSlot());
+    b.setAttribute("aria-selected", i === curSlot());
+  });
+}
+
 function renderPads() {
+  renderSlotTabs();
   const wrap = $("#pads");
   const connected = state.pads_connected;
-  const extra = state.slots.filter((s) => s.loaded && s.pad >= connected).map((s) => s.pad);
+  const base = curSlot() * PPS();
+  const extra = state.slots.filter((s) => s.loaded && Math.floor(s.pad / PPS()) === curSlot() && s.pad - base >= connected).map((s) => s.pad - base);
   const total = Math.max(connected, extra.length ? Math.max(...extra) + 1 : 0);
   const modules = Math.ceil(total / 3);
   const roles = state.pad_roles || [];
@@ -309,9 +347,9 @@ function renderPads() {
     const btModule = roles[m * 3] && roles[m * 3] !== "pad";
     row.innerHTML = `<div class="module-label">MOD ${m + 1}${btModule ? " · BT" : ""}</div>`;
     for (let k = 0; k < 3; k++) {
-      const p = m * 3 + k;
+      const p = m * 3 + k;  // the button
       const el = document.createElement("div");
-      el.dataset.pad = p;
+      el.dataset.pad = base + p;  // where its sound in this slot is stored
       el.tabIndex = 0;
       el.setAttribute("role", "button");
       const tile = BT_TILES[roles[p]];
@@ -324,7 +362,7 @@ function renderPads() {
         row.appendChild(el);
         continue;
       }
-      const s = slotFor(p);
+      const s = slotFor(base + p);
       el.className = "pad" + (s.loaded ? " loaded" : "") + (p >= connected ? " offline" : "");
       el.innerHTML = `
         <div class="top-row"><span class="no">${pad2(p + 1)}</span><span class="led"></span></div>
@@ -334,10 +372,10 @@ function renderPads() {
         <div class="prog"></div>`;
       const sel = sampleSelect(s.loaded ? s.sample : "");
       sel.onclick = (e) => e.stopPropagation();
-      sel.onchange = () => api("PATCH", `/api/slots/${p}`, { sample: sel.value }).catch((e) => toast(e.message));
+      sel.onchange = () => api("PATCH", `/api/slots/${base + p}`, { sample: sel.value }).catch((e) => toast(e.message));
       el.insertBefore(sel, el.querySelector(".prog"));
-      el.onclick = () => (s.loaded ? openEditor(p) : pickFile(p));
-      enableDrop(el, p);
+      el.onclick = () => (s.loaded ? openEditor(base + p) : pickFile(base + p));
+      enableDrop(el, base + p);
       row.appendChild(el);
       if (s.loaded) requestAnimationFrame(() => drawPeaks(el.querySelector("canvas"), s.peaks));
     }
@@ -393,9 +431,9 @@ async function uploadFile(pad, file) {
       await api("POST", "/api/library", wav, headers);
       toast(`${name} added to the library`);
     } else {
-      toast(`uploading to pad ${pad2(pad + 1)}…`, 60000);
+      toast(`uploading to pad ${padLabel(pad)}…`, 60000);
       await api("POST", `/api/slots/${pad}`, wav, headers);
-      toast(`pad ${pad2(pad + 1)} loaded`);
+      toast(`pad ${padLabel(pad)} loaded`);
     }
   } catch (e) {
     toast(`could not load: ${e.message || e}`, 4000);
@@ -429,7 +467,7 @@ function openEditor(pad) {
 function fillEditor() {
   const s = slotFor(editing);
   if (!s.loaded) { $("#editor").close(); return; }
-  $("#ed-no").textContent = pad2(editing + 1);
+  $("#ed-no").textContent = padLabel(editing);
   if (document.activeElement !== $("#ed-name")) $("#ed-name").value = s.name;
   $("#ed-gain").value = s.gain;
   $("#ed-pitch").value = s.pitch;
@@ -443,10 +481,19 @@ function fillEditor() {
   const sel = $("#ed-move");
   sel.innerHTML = "<option value=''>—</option>";
   const total = Math.max(state.pads_connected, 3);
-  for (let p = 0; p < total; p++) {
-    if (p === editing) continue;
-    const o = slotFor(p);
-    sel.add(new Option(`${pad2(p + 1)} ${o.loaded ? "(swap: " + o.name + ")" : "(empty)"}`, p));
+  // any pad in any slot, this slot first
+  const slots = [...Array(state.slot_count || 1).keys()];
+  const here = Math.floor(editing / PPS());
+  for (const n of [here, ...slots.filter((x) => x !== here)]) {
+    const g = document.createElement("optgroup");
+    g.label = `slot ${n + 1}`;
+    for (let p = 0; p < total; p++) {
+      const i = n * PPS() + p;
+      if (i === editing) continue;
+      const o = slotFor(i);
+      g.appendChild(new Option(`${padLabel(i)} ${o.loaded ? "(swap: " + o.name + ")" : "(empty)"}`, i));
+    }
+    sel.appendChild(g);
   }
 }
 
@@ -479,7 +526,7 @@ $("#ed-reverse").onclick = () => patchSlot(editing, { reverse: !slotFor(editing)
 $("#ed-play").onclick = () => api("POST", `/api/slots/${editing}/trigger`);
 $("#ed-replace").onclick = () => { $("#editor").close(); pickFile(editing); };
 $("#ed-clear").onclick = async () => {
-  if (!confirm(`Take the sound off pad ${pad2(editing + 1)}? It stays in the library.`)) return;
+  if (!confirm(`Take the sound off pad ${padLabel(editing)}? It stays in the library.`)) return;
   await api("DELETE", `/api/slots/${editing}`);
   $("#editor").close();
 };
@@ -488,7 +535,7 @@ $("#ed-move").onchange = async (e) => {
   const to = +e.target.value;
   await api("POST", "/api/slots/swap", { a: editing, b: to });
   editing = to;
-  toast(`moved to pad ${pad2(to + 1)}`);
+  toast(`moved to pad ${padLabel(to)}`);
 };
 $("#editor").addEventListener("close", () => (editing = null));
 
@@ -704,7 +751,7 @@ function render() {
   renderLibrary();
   renderSettings();
   // rebuilding the pad grid is the only expensive bit; skip it when nothing changed
-  const key = `${state.version}/${state.pads_connected}/${(state.pad_roles || []).join()}/${state.library.length}/${state.library.map((i) => i.name).join()}`;
+  const key = `${state.version}/${curSlot()}/${state.pads_connected}/${(state.pad_roles || []).join()}/${state.library.length}/${state.library.map((i) => i.name).join()}`;
   if (key !== lastPadKey) {
     lastPadKey = key;
     renderPads();

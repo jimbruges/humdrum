@@ -6,6 +6,8 @@ is the phone (Bluetooth) and the sample pads, the right half is the mic.
     cols 0-4   Bluetooth symbol: dim = no phone, mid = connected, bright = music
                playing, struck through = muted, blinking = Bluetooth is off
     col  5     the Bluetooth effect's amount, bottom up (only while it's on)
+    col  6     which slot the pads play: one dot, top = slot 1 ... row 6 = slot 4
+               (bright while the Bluetooth knob is in slot mode)
     col  7     the mic effect's amount (only while it's on)
     cols 8-12  mic: bright = live, struck through = muted
     row  7     cols 0-5 phone + pads volume, cols 7-12 mic volume
@@ -14,7 +16,7 @@ Whatever a knob is set to change (its volume or its effect) is drawn brighter.
 
 Anything you do shows a full-width banner for about a second: volume (icon,
 0-99 and a bar), effect (its name and amount; a mark on row 6 says which side),
-mute, knob mode, Bluetooth transport icons, connect / disconnect (then the
+mute, knob mode, pad slot (S1-S4 and four marks), Bluetooth transport icons, connect / disconnect (then the
 phone's name scrolls by) and a new track (its title scrolls by).
 """
 
@@ -253,6 +255,8 @@ class Channel:
     knob: str | None = None  # "volume" / "fx": what its knob turns now, None if no knob
     status: str = "on"  # Bluetooth: "off" (no Bluetooth), "idle" (no phone), "connected", "playing"
     level: float = 0.0  # signal peak 0..1: the icon pulses with it while live
+    slot: int = 0  # Bluetooth strip only: the pads' slot (0-based) ...
+    slots: int = 1  # ... out of how many; 1 = no slot dot
 
 
 def _strip(c: Canvas, ch: Channel, side: str, now: float) -> None:
@@ -275,6 +279,13 @@ def _strip(c: Canvas, ch: Channel, side: str, now: float) -> None:
     if ch.fx is not None:
         c.vbar(fxcol, 0, 6, ch.fx, 1 if ch.fx_bypassed else fx_lv)
     c.hbar(x0, x1, 7, ch.volume, vol_lv)
+    if left and ch.slots > 1:
+        c.set(6, slot_row(ch.slot, ch.slots), MAX if ch.knob == "slot" else 3)
+
+
+def slot_row(slot: int, slots: int) -> int:
+    """Row of the home screen's slot dot in col 6: slot 1 at the top, the last at row 6."""
+    return round(slot * 6 / max(1, slots - 1))
 
 
 def home(bt: Channel, mic: Channel, now: float = 0.0) -> bytes:
@@ -353,14 +364,30 @@ def mute(side: str, muted: bool) -> bytes:
     return c.frame()
 
 
-def knob_mode(side: str, mode: str) -> bytes:
-    """A knob switched between its volume and its effect."""
+def knob_mode(side: str, mode: str, slot: int = 0) -> bytes:
+    """A knob switched to its volume, its effect or (Bluetooth knob) the pad slot."""
     c = Canvas()
     c.icon("bt" if side == "bt" else "mic", 0, 0, MAX)
     if mode == "volume":
         c.icon("speaker", 6, 0, MAX)
+    elif mode == "slot":
+        c.text(f"S{slot + 1}", x=6, y=1)
     else:
         c.text("FX", x=6, y=1)
+    return c.frame()
+
+
+def slot(index: int, count: int) -> bytes:
+    """The pads moved to another slot of sounds: "S2" and a mark per slot on row 7
+    (the current one bright), with the phone + pads side line."""
+    c = Canvas()
+    c.text(f"S{index + 1}", y=0)
+    _side_mark(c, "bt")
+    w = (COLS + 1) // count  # 13 cols, 4 slots: 2-wide marks, 1 apart, centred
+    x0 = (COLS - (count * w - 1)) // 2
+    for i in range(count):
+        for x in range(x0 + i * w, x0 + i * w + w - 1):
+            c.set(x, 7, MAX if i == index else 1)
     return c.frame()
 
 

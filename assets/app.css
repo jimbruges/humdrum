@@ -121,6 +121,10 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 }
 
 /* pads */
+.slot-row { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; margin-bottom: 12px; }
+.slot-label { font-size: 11px; text-transform: uppercase; color: var(--ink-2); letter-spacing: .08em; }
+.seg.slots { grid-template-columns: repeat(var(--n, 4), 1fr); }
+.seg.slots button small { margin-left: 4px; opacity: .6; }
 .pads { display: grid; gap: 14px; }
 .module { display: grid; grid-template-columns: 22px repeat(3, 1fr); gap: 8px; align-items: stretch; }
 .module-label { writing-mode: vertical-rl; transform: rotate(180deg); font: 10px var(--mono); color: var(--ink-2); text-align: center; letter-spacing: .1em; }

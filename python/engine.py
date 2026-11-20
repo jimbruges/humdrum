@@ -19,7 +19,7 @@ import numpy as np
 import audio_ports
 import bt
 from fx import SR, InputConditioner, make_effects
-from slots import MAX_PADS, SlotBank, tidy_recording
+from slots import MAX_PADS, SlotBank, pad_label, tidy_recording
 
 log = logging.getLogger("engine")
 MIC_WAIT_S = 0.05    # an empty mic read this long: keep the output going with silence
@@ -785,7 +785,7 @@ class Engine:
             if len(take) < SR * 0.05:
                 log.info("pad %d: recording too short, ignored", pad)
                 return
-            self.bank.set_audio(pad, take, name=f"Pad {pad + 1} · {time.strftime('%d %b %H:%M:%S')}", kind="recordings")
+            self.bank.set_audio(pad, take, name=f"{pad_label(pad)} · {time.strftime('%d %b %H:%M:%S')}", kind="recordings")
             if self.on_recorded:
                 self.on_recorded(pad)
 
