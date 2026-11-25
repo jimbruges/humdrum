@@ -74,7 +74,8 @@ static const uint32_t KNOB_LONG_MS = 700;
 static const uint32_t DEBOUNCE_MS = 12;
 // The knob's switch must read the same this many polls in a row (~12 ms) to count
 static const uint8_t KNOB_STABLE_READS = 3;
-// More detent steps than this in one 4 ms poll can only be a corrupted read
+// More detent steps than this in one 10 ms poll can only be a corrupted read
+// (or the knob restarting: see pollKnob)
 static const int16_t KNOB_MAX_STEP = 40;
 static const uint32_t TOF_POLL_MS = 10;
 static const uint32_t TOF_REPORT_MIN_MS = 25;   // at most ~40 updates/s over the Bridge
@@ -113,6 +114,8 @@ struct KnobModule {
   uint8_t rawRun;
   uint32_t downAt;
   bool longSent;
+  int16_t jumpPos;  // where a reading too far from `last` put it
+  uint8_t jumpRun;  // reads in a row that agree with jumpPos
 };
 KnobModule knobs[MAX_KNOBS];
 int knobCount = 0;
@@ -143,6 +146,16 @@ int16_t handReported = -2;
 uint32_t lastTofPoll = 0;
 uint32_t lastTofReport = 0;
 uint32_t badReads = 0;  // Modulino reads rejected as corrupted
+// the latest one: its module's address, and why (BAD_*), reported with the count
+uint8_t badAddr = 0;
+uint8_t badWhy = 0;
+enum BadWhy : uint8_t { BAD_BUTTONS = 1, BAD_KNOB = 2, BAD_KNOB_JUMP = 3 };
+
+void noteBad(uint8_t addr, uint8_t why) {
+  badReads++;
+  badAddr = addr;
+  badWhy = why;
+}
 
 uint8_t padStates[MAX_PADS];
 uint32_t holdMs = 600;
@@ -618,7 +631,7 @@ void pollButtons(uint32_t now) {
     uint8_t b[3], pin = 0;
     if (!modRead(m.addr, b, 3, &pin)) continue;
     if (!buttonsReadOk(pin, b)) {
-      badReads++;
+      noteBad(m.addr, BAD_BUTTONS);
       continue;
     }
     for (int k = 0; k < PADS_PER_MODULE; k++) {
@@ -648,15 +661,30 @@ void pollKnob(int ki, uint32_t now) {
   uint8_t b[3], pin = 0;
   if (!modRead(k.addr, b, 3, &pin)) return;
   if (!knobReadOk(pin, b)) {
-    badReads++;
+    noteBad(k.addr, BAD_KNOB);
     return;
   }
   int16_t pos = (int16_t)(b[0] | (b[1] << 8));
   int16_t step = (int16_t)(pos - k.last);  // int16 wrap-safe
   if (abs(step) > KNOB_MAX_STEP) {
-    badReads++;
+    noteBad(k.addr, BAD_KNOB_JUMP);
+    // A knob that restarted (a dip in the Qwiic power) counts from 0 again: one
+    // jump, then steady readings from there. Rejecting those for good left the
+    // knob dead until it was replugged (2026-11-25, ~100 rejects a second). So
+    // when a few reads in a row agree with each other, that's where the knob is
+    // now: carry on from there, without reporting the jump as a turn.
+    if (k.jumpRun && abs((int16_t)(pos - k.jumpPos)) <= KNOB_MAX_STEP) {
+      if (++k.jumpRun >= KNOB_STABLE_READS) {
+        k.last = pos;
+        k.jumpRun = 0;
+      }
+    } else {
+      k.jumpRun = 1;
+    }
+    k.jumpPos = pos;
     return;
   }
+  k.jumpRun = 0;
   k.accum += step;
   k.last = pos;
 
@@ -895,7 +923,7 @@ void loop() {
     static uint32_t badReported = 0;
     if (badReads != badReported) {
       badReported = badReads;
-      Bridge.notify("bad_reads", (int)badReads);
+      Bridge.notify("bad_reads", (int)badReads, (int)badAddr, (int)badWhy);
     }
   }
   if (topologyDirty) {

@@ -10,6 +10,7 @@ Glues together:
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import sys
 import logging
@@ -79,9 +80,17 @@ DEFAULTS = {
     "theremin_far_mm": 350,
     "buzzer_mode": "off",
     "block": 512,
+    # frames per ALSA period, which is also PipeWire's quantum (engine.IO_PERIOD).
+    # 256 takes about 13 ms off the mic's delay, but needs PipeWire running with
+    # realtime priority (host/bluetooth/install.sh sets that up); without it the
+    # shorter deadline is missed now and then, a click.
+    "io_period": 512,
     "input_device": "jack:1",
     "output_device": "jack:1",
     "carrier_outputs": ["headphones"],  # Media Carrier jacks that play
+    # what the two channels carry (audio_ports.SPLITS): the mix on every jack, or
+    # the mic on one channel and the music on the other, for two mixer inputs
+    "output_split": "off",
     "mic_mute": False,
     "bt_level": 0.5,
     "bt_fx_index": 1,
@@ -147,11 +156,11 @@ MAX_KNOBS = 4
 LIMITS = {
     "fx_index": (0, 7), "theremin_near_mm": (10, 300), "theremin_far_mm": (100, 1200), "fx_amount": (-1.0, 1.0), "mic_gain_db": (-12.0, 36.0), "gate_db": (-90.0, -20.0), "mic_pad_db": (0, audio_ports.MIC_PAD_MAX_DB),
     "monitor_level": (0.0, 1.5), "sample_level": (0.0, 1.5), "master": (0.0, 1.5), "max_rec_s": (1, 30),
-    "hold_ms": (200, 3000), "knob_step": (0.005, 0.1), "block": (256, 2048),
+    "hold_ms": (200, 3000), "knob_step": (0.005, 0.1), "block": (256, 2048), "io_period": (128, 1024),
     "hp_gain": (1, 20), "bt_level": (0.0, 1.5), "bt_fx_index": (0, 7), "bt_fx_amount": (-1.0, 1.0),
     "pad_slot": (0, SLOTS - 1),
 }
-DEVICE_KEYS = {"input_device", "output_device", "block"}
+DEVICE_KEYS = {"input_device", "output_device", "block", "io_period"}
 
 # Pad LED states, must match the PadState enum in sketch.ino
 EMPTY, LOADED, RECORDING, ARMED, PLAYING = range(5)
@@ -219,7 +228,11 @@ follower = buzzer.BuzzerFollower()
 mcu_calls: queue.SimpleQueue = queue.SimpleQueue()  # Bridge.call is not allowed inside handlers
 save_due = 0.0
 state_due = 0.0  # a state push owed to the UI (knob turns), sent at most every STATE_PUSH_S
+state_full = False  # ...and whether it must be the full state, not just the settings
 STATE_PUSH_S = 0.15
+# Settings whose change reshapes more of the state than the settings themselves
+# (the knob, Pixels and Buttons lists): those still push the full state.
+STRUCTURAL_KEYS = {"knob_roles", "knob_modes", "knob_clicks", "pixels_roles", "button_roles", "module_order"}
 # What the matrix shows over the home screen for a moment: (draw(now) -> frame,
 # until, priority). Turning a knob (2) always shows; the phone's own changes
 # (play/pause, a new track: 1) never cover a connect / disconnect (3).
@@ -244,6 +257,7 @@ def save_settings_soon() -> None:
 
 def apply_settings(changes: dict) -> dict:
     reopen = False
+    structural = False
     for k, v in changes.items():
         if k not in DEFAULTS or k in ("known_modules", "module_order", "module_setup", "chain_addrs", "kit_loaded", "fx_version"):
             continue
@@ -265,6 +279,8 @@ def apply_settings(changes: dict) -> dict:
             v = {str(a): r for a, r in dict(v or {}).items() if r in PIXELS_ROLES}
         elif k == "button_roles":
             v = {str(a): r for a, r in dict(v or {}).items() if r in BUTTON_ROLES}
+        elif k == "output_split":
+            v = v if v in audio_ports.SPLITS else "off"
         elif k == "buzzer_mode":
             v = v if v in buzzer.MODES else "off"
             if v == "off":
@@ -274,6 +290,7 @@ def apply_settings(changes: dict) -> dict:
         if settings.get(k) != v:
             settings[k] = v
             reopen |= k in DEVICE_KEYS
+            structural |= k in STRUCTURAL_KEYS or k in DEVICE_KEYS
             if k == "hold_ms":
                 mcu_calls.put(("set_hold_ms", int(v)))
             if k == "hp_gain":
@@ -282,16 +299,21 @@ def apply_settings(changes: dict) -> dict:
                 _clamp_fx_amount(k)
             if k == "mic_pad_db" and audio_ports.is_carrier(settings["input_device"]):
                 audio_ports.set_mic_gain(int(v))
-            if k in ("carrier_outputs", "hp_gain") and audio_ports.is_carrier(settings["output_device"]):
-                audio_ports.apply_ports(settings["carrier_outputs"])
+            if k in ("carrier_outputs", "hp_gain", "output_split") and audio_ports.is_carrier(settings["output_device"]):
+                audio_ports.apply_ports(carrier_ports())
             if k == "pad_slot":
                 _show_slot()  # picked in the web UI: show it on the matrix too
     ensure_fx_available()
     if reopen:
         engine.reopen_devices()
     save_settings_soon()
-    _push_state_soon()  # coalesced: a full push per click starved the audio thread
+    _push_state_soon(full=structural)  # coalesced: a full push per click starved the audio thread
     return settings
+
+
+def carrier_ports() -> list[str]:
+    """The Media Carrier jacks that play (the ones ticked, plus what a split needs)."""
+    return audio_ports.ports_for(settings["carrier_outputs"], settings["output_split"])
 
 
 def logged(fn):
@@ -480,10 +502,12 @@ def _step_db(key: str, delta: int) -> float | None:
     return step_db  # into or out of silence: the click's worth
 
 
-def _push_state_soon() -> None:
-    """Push the state to the web UI within STATE_PUSH_S, once however many changes come in."""
-    global state_due
+def _push_state_soon(full: bool = False) -> None:
+    """Push the state to the web UI within STATE_PUSH_S, once however many changes
+    come in: just the settings (push_settings) unless `full`."""
+    global state_due, state_full
     state_due = state_due or time.monotonic() + STATE_PUSH_S
+    state_full = state_full or full
 
 
 FX_AMOUNT_KEY = {"fx_index": "fx_amount", "bt_fx_index": "bt_fx_amount"}
@@ -939,10 +963,23 @@ def on_hand(mm: int) -> None:
     engine.effects[THEREMIN].hand = engine.bt_effects[THEREMIN].hand = hand_closeness(hand_mm)
 
 
-def on_bad_reads(count: int) -> None:
-    # corrupted Modulino reads the sketch threw away; a steady climb means a flaky Qwiic cable
+BAD_WHY = {1: "a Buttons reading", 2: "a knob reading", 3: "a knob jump (it restarted, or a corrupted reading)"}
+_bad_logged = (0, 0.0)  # (count, when) last logged
+
+
+def on_bad_reads(count: int, addr: int = 0, why: int = 0) -> None:
+    """Corrupted Modulino reads the sketch threw away (once a second while there
+    are new ones). A steady climb means a flaky Qwiic cable. Logged at most every
+    10 s: while a module failed every poll this filled the log once a second."""
+    global _bad_logged
     topology["bad_reads"] = int(count)
-    log.warning("Qwiic bus: %d corrupted Modulino reads rejected so far", int(count))
+    now = time.monotonic()
+    if now - _bad_logged[1] < 10:
+        return
+    latest = f" (latest: {BAD_WHY.get(int(why), 'a reading')} from {int(addr):x})" if addr else ""
+    log.warning("Qwiic bus: %d corrupted Modulino reads rejected so far, %d since the last report%s",
+                int(count), int(count) - _bad_logged[0], latest)
+    _bad_logged = (int(count), now)
 
 
 Bridge.provide("bad_reads", logged(on_bad_reads))
@@ -989,7 +1026,7 @@ def full_state() -> dict:
         "slots": [bank.describe(p) for p in range(MAX_PADS) if p % PADS_PER_SLOT < n or bank.slots[p].loaded],
         "devices": engine.device_status,
         "audio": {"carrier": audio_ports.is_carrier(settings["output_device"]), **engine.stats,
-                  "bt_underruns": engine.bt_in.underruns, "bt_fill_ms": engine.bt_in.fill_ms},
+                  "bt_underruns": engine.bt_in.underruns, "bt_resyncs": engine.bt_in.resyncs, "bt_fill_ms": engine.bt_in.fill_ms},
         "version": bank.version,
     }
 
@@ -1002,6 +1039,21 @@ def _pixels_logical() -> list[int]:
 
 def push_state() -> None:
     ui.send_message("state", full_state())
+
+
+def push_settings() -> None:
+    """The part of the state a knob turn or a slider changes. The full state is
+    about 77 KB of JSON (the library, every slot's pads); building and encoding
+    it every 0.15 s while a knob turned held the GIL long enough to make the
+    audio thread late."""
+    ui.send_message("settings", {
+        "settings": settings,
+        "bluetooth": bluetooth.state,
+        "bt_audio": bool(engine.bt_in.node),
+        "devices": engine.device_status,
+        "audio": {"carrier": audio_ports.is_carrier(settings["output_device"]), **engine.stats,
+                  "bt_underruns": engine.bt_in.underruns, "bt_resyncs": engine.bt_in.resyncs, "bt_fill_ms": engine.bt_in.fill_ms},
+    })
 
 
 def pad_states() -> bytes:
@@ -1049,7 +1101,7 @@ def on_bt_change(state: dict) -> None:
     """Show Bluetooth events on the matrix: usually nobody is looking at the web UI."""
     global _bt_last
     last, _bt_last = _bt_last, dict(state)
-    push_state()
+    push_settings()  # (it carries the Bluetooth state; the full state cost the audio thread a late block per track change)
     if last is None or not state.get("available"):
         return  # first look at the helper (app start), or no helper: nothing happened
     if last.get("powered") and not state.get("powered"):
@@ -1084,12 +1136,19 @@ def _pad_ok(pad: int) -> bool:
     return 0 <= pad < MAX_PADS
 
 
+def _json(obj) -> Response:
+    """A reply encoded by json.dumps. Returning the dict lets FastAPI walk it in
+    Python first (jsonable_encoder): 65 ms for the full state on the board, with
+    the GIL held often enough to make the audio thread late; json.dumps takes 12."""
+    return Response(json.dumps(obj, separators=(",", ":")), media_type="application/json")
+
+
 async def api_state():
-    return full_state()
+    return _json(full_state())
 
 
 async def api_settings(request: Request):
-    return apply_settings(await request.json())
+    return _json(apply_settings(await request.json()))
 
 
 async def api_upload(pad: int, request: Request):
@@ -1203,7 +1262,7 @@ async def api_audio_identify():
                 engine.post("tone", freq, beeps)
                 time.sleep(0.3 * beeps + 1.0)
         finally:
-            audio_ports.apply_ports(settings["carrier_outputs"])
+            audio_ports.apply_ports(carrier_ports())
             ui.send_message("audio_test", {"done": True})
             _identifying.release()
 
@@ -1221,7 +1280,7 @@ async def api_audio_debug():
     for t in threading.enumerate():
         if t.name == "audio" and t.ident in frames:
             out["audio"] = traceback.format_stack(frames[t.ident])[-8:]
-    return {"stats": engine.stats, "devices": engine.device_status, **out}
+    return _json({"stats": engine.stats, "devices": engine.device_status, "trace": list(engine.trace), "slow": list(engine.slow), **out})
 
 
 ui.expose_api("GET", "/api/audio/debug", api_audio_debug)
@@ -1344,7 +1403,7 @@ def loop() -> None:
 
 
 def _loop() -> None:
-    global _last_states, _last_states_at, _last_frame, _last_meter, save_due, state_due, _wave, banner
+    global _last_states, _last_states_at, _last_frame, _last_meter, save_due, state_due, state_full, _wave, banner
     now = time.monotonic()
 
     while not mcu_calls.empty():
@@ -1424,9 +1483,11 @@ def _loop() -> None:
     # taking data; say so in the UI rather than going silent without a word.
     global _blocks_seen
     blocks = engine.stats["blocks"]
-    if blocks != _blocks_seen[0]:
+    if blocks != _blocks_seen[0] or not _blocks_seen[1]:  # (the first look starts the clock)
         if engine.stats.get("stalled"):
             engine.stats["stalled"] = False
+            if engine.stats["last_error"].startswith("audio stopped"):
+                engine.stats["last_error"] = ""
             push_state()
         _blocks_seen = (blocks, now)
     elif now - _blocks_seen[1] > 2 and engine.device_status.get("output") == "open" and not engine.stats.get("stalled"):
@@ -1463,7 +1524,11 @@ def _loop() -> None:
 
     if state_due and now > state_due:
         state_due = 0.0
-        push_state()
+        if state_full:
+            state_full = False
+            push_state()
+        else:
+            push_settings()
     if save_due and now > save_due:
         save_due = 0.0
         tmp = SETTINGS_PATH.with_suffix(".tmp")
@@ -1478,5 +1543,49 @@ def _loop() -> None:
 mcu_calls.put(("set_auto_enrol", not setup_mode))  # the sketch waits for this before setting up modules
 mcu_calls.put(("rescan",))
 
+# Python's cycle collector stops every thread while it runs, the audio thread
+# included. Everything loaded so far (the app, its libraries, the sample
+# library) lives for good: freeze it out of the collector's scans, so a full
+# collection only looks at what's new. gc_max_ms (system page) shows the
+# longest pause since.
+gc.collect()
+gc.freeze()
+_gc_started = 0.0
+
+
+def _gc_watch(phase: str, info: dict) -> None:
+    global _gc_started
+    if phase == "start":
+        _gc_started = time.perf_counter()
+    elif _gc_started:
+        ms = (time.perf_counter() - _gc_started) * 1e3
+        if ms > engine.stats.get("gc_max_ms", 0.0):
+            engine.stats["gc_max_ms"] = round(ms, 1)
+
+
+gc.callbacks.append(_gc_watch)
+
+
+def _watch_sound_card() -> None:
+    """If the carrier's PipeWire nodes go missing, reopen the devices (which puts
+    them back, see audio_ports.ensure_carrier_profile). Without them the app's
+    output lands on PipeWire's dummy sink: silence, and no error to notice it by
+    (after a reboot on 2026-11-24)."""
+    missed = 0
+    while True:
+        time.sleep(10)
+        try:
+            carrier = audio_ports.is_carrier(settings["output_device"]) or audio_ports.is_carrier(settings["input_device"])
+            missed = missed + 1 if carrier and audio_ports.carrier_nodes_missing() else 0
+            if missed >= 2:
+                missed = 0
+                log.warning("the sound card's nodes are missing: reopening the audio devices")
+                engine.stats["last_error"] = "sound card disappeared, reopened"
+                engine.reopen_devices()
+        except Exception:
+            log.exception("sound card watch")
+
+
+threading.Thread(target=_watch_sound_card, name="sound-card", daemon=True).start()
 engine.start()
 App.run(user_loop=loop)
