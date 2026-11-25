@@ -68,13 +68,28 @@ Every Modulino takes one grid slot, so count the knobs and optional modules when
 
 The carrier has three 3.5 mm jacks: **Line Out** (mono, balanced), **Mic In / Headphones** (TRRS combo) and **Ear Out**. Two of them, on the UNO Q's digital-header edge, point out of the case's **front wall**. The third faces into the case and isn't used.
 
+**Two channels, three jacks.** The codec has only two output channels, left and right, and the jacks share them:
+
+| Jack | Plays |
+|---|---|
+| Headphones (combo jack) | left on the tip, right on the ring: stereo |
+| Line out | the left channel, mono (balanced) |
+| Ear out | the left channel, mono |
+
+So at most two different signals come out at once. Stereo music with the mic on its own channel would need three; use the headphone jack for stereo, or split the mic and the music (*mic and music*, below), which makes the music mono.
+
 > ⚠️ The datasheet doesn't say which physical jack is which. In the web UI, settings → *audio in / out* → **identify jacks** plays each jack on its own (1 beep = headphones/combo jack, 2 = line out, 3 = ear out) and shows which one is playing, so you can label the front wall to match. If the line out turns out to be the inward-facing jack, use a short 3.5 mm extension.
 
 **The audio settings** (settings → *audio in / out*):
 
 - **Mic input**: the Media Carrier's combo-jack mic, or a USB mic if one is plugged in. The *mic* meter under it shows the raw input level, and the line below says in plain words what's wrong if the input is silent or so noisy that the noise gate is muting it.
-- **Output**: the Media Carrier, or a USB audio device. With the Media Carrier, tick which jacks play: **headphones** (the combo jack, stereo), **line out** and **ear out** (both mono), in any combination. Line out and ear out play the left channel, so with only those ticked the mix is summed to mono.
-- **Mic and music** splits the two onto separate mixer channels: *mic on line out* puts the mic on line out and the music (Bluetooth and pads, mono) on the headphone jack's **right** channel, and *music on line out* swaps them. Take the right channel with a 3.5 mm stereo-to-two-mono cable (to two RCA plugs or two jacks), the right (red) leg; the headphone jack's left channel carries the same as line out. Each side gets its own limiter, so a loud mic doesn't turn the music down.
+- **Output**: the Media Carrier, or a USB audio device. With the Media Carrier, tick which jacks play, in any combination. With only line out or ear out ticked, the mix is summed to mono so they don't lose the music's right channel.
+- **Mic and music**: what the two channels carry.
+  - *Same mix on every jack* (default): the music in stereo with the mic in the middle.
+  - *Mic on line out*: the mic on the left channel (line out), the music in mono on the right (the headphone jack's ring). For a mixer's mic channel plus a line input.
+  - *Music on line out*: the other way round.
+
+  To use the right channel on its own, plug a 3.5 mm stereo-to-two-mono cable (to two RCA plugs or two jacks) into the headphone jack and use its right (red) leg; the left leg carries the same as line out. The mic and the music each get their own limiter, so a loud voice never turns the music down.
 - **Test tone** plays a short beep on the ticked jacks at a fixed level (about −12 dBFS), whatever the master and sample levels are set to.
 
 How it works: the app keeps the sound card on PipeWire's *Headphones* profile, which is the only one that routes the mic. Line out and ear out are switched on alongside it with the codec switches from Arduino's [Media Carrier user manual](https://docs.arduino.cc/tutorials/uno-media-carrier/user-manual/). The headphone path itself has to stay powered while audio is streaming (switching it off stalls the sound card), so unticking *headphones* mutes the combo jack's amplifier instead. The mic's capture gain is held low in the codec (`ADC2 Volume` 0, `TX_DEC0 Volume` 78, 6 dB under unity) so a loud voice has headroom, and the app adds its own gain after the rumble filter. A mic hot enough to clip the codec anyway pads `TX_DEC0` down by itself, in steps (*mic input pad* in settings).
