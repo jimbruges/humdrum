@@ -18,6 +18,8 @@ const socket = io({ transports: ["websocket", "polling"] });
 socket.on("connect", () => $("#conn").classList.remove("off"));
 socket.on("disconnect", () => $("#conn").classList.add("off"));
 socket.on("state", (s) => { state = s; render(); });
+// knob turns and sliders send just the settings (and audio stats), merged into the last full state
+socket.on("settings", (s) => { if (state) { Object.assign(state, s); render(); } });
 socket.on("meter", (m) => { meter = m; renderMeter(); });
 
 async function api(method, path, body, headers = {}) {
@@ -637,10 +639,11 @@ function renderSettings() {
     <dt>input</dt><dd>${state.devices.input}</dd>
     <dt>output</dt><dd>${state.devices.output}</dd>
     <dt>audio blocks</dt><dd>${state.audio?.blocks ?? "?"} (mic reopened ${state.audio?.mic_reopens ?? 0}×)</dd>
-    <dt>audio load</dt><dd>${state.audio?.dsp_ms ?? "?"} ms of every ${((state.settings?.block ?? 512) / 48).toFixed(1)} ms block</dd>
+    <dt>audio load</dt><dd>${state.audio?.dsp_ms ?? "?"} ms of every ${((state.settings?.block ?? 512) / 48).toFixed(1)} ms block (slowest lately ${state.audio?.dsp_max_ms ?? "?"} ms, longest Python pause ${state.audio?.gc_max_ms ?? 0} ms)</dd>
+    <dt>mic to output</dt><dd>${state.audio?.io_ms ?? "?"} ms buffered in the app (holding ${state.audio?.out_margin_ms ?? "?"} ms between the mic and the output), output ran dry ${state.audio?.out_underruns ?? 0}×, ${state.audio?.mic_skipped_ms ?? 0} ms of late mic audio dropped</dd>
     <dt>mic clipping</dt><dd>${state.audio?.mic_clips ? `${state.audio.mic_clips} clipped blocks, codec padded ${state.settings?.mic_pad_db ?? 0} dB` : "none"}</dd>
     <dt>limiter</dt><dd>${state.audio?.limit_db ? `turning peaks down by ${state.audio.limit_db} dB` : "idle"}</dd>
-    <dt>bluetooth buffer</dt><dd>${state.audio?.bt_fill_ms ?? 0} ms, ${state.audio?.bt_underruns ?? 0} underruns</dd>
+    <dt>bluetooth buffer</dt><dd>${state.audio?.bt_fill_ms ?? 0} ms, ${state.audio?.bt_underruns ?? 0} underruns, ${state.audio?.bt_resyncs ?? 0} skips ahead</dd>
     <dt>last audio error</dt><dd>${state.audio?.last_error || "none"}</dd>
     <dt>bad bus reads</dt><dd>${t.bad_reads ?? 0}</dd>
     <dt>on the bus</dt><dd>${t.bus || "?"}</dd>`;
@@ -652,7 +655,22 @@ function renderSettings() {
 // audio devices and Media Carrier jacks
 // ---------------------------------------------------------------------------
 
-let devices = { inputs: [], outputs: [], ports: [] };
+let devices = { inputs: [], outputs: [], ports: [], splits: [] };
+
+// Line out and ear out are fed from the left channel; the combo jack plays both.
+const SPLIT_HELP = {
+  off: "Every ticked jack plays the same mix. Line out and ear out are mono (they play the left channel): " +
+    "with only those ticked, the mix is summed to mono for them.",
+  mic_line: "<b>Line out</b> (balanced, mono) plays the mic, for the mixer's mic channel. " +
+    "The <b>headphone jack's right channel</b> plays the music (Bluetooth and pads, summed to mono): " +
+    "a 3.5 mm stereo-to-two-mono cable (to 2 RCA or 2 jacks), its right (red) leg into a line input. " +
+    "The headphone jack's left channel plays the mic too.",
+  music_line: "<b>Line out</b> (balanced, mono) plays the music (Bluetooth and pads, summed to mono). " +
+    "The <b>headphone jack's right channel</b> plays the mic: " +
+    "a 3.5 mm stereo-to-two-mono cable (to 2 RCA or 2 jacks), its right (red) leg into the mixer. " +
+    "The headphone jack's left channel plays the music too.",
+};
+const SPLIT_PORTS = ["headphones", "lineout"];
 
 async function loadDevices() {
   try {
@@ -677,6 +695,7 @@ function fillDeviceSelect(sel, list, value) {
 
 $("#dev-in").onchange = (e) => sendSettings({ input_device: e.target.value });
 $("#dev-out").onchange = (e) => sendSettings({ output_device: e.target.value });
+$("#split").onchange = (e) => sendSettings({ output_split: e.target.value });
 
 function renderAudio() {
   fillDeviceSelect($("#dev-in"), "inputs", state.settings.input_device);
@@ -696,14 +715,25 @@ function renderAudio() {
       const cb = Object.assign(document.createElement("input"), { type: "checkbox", className: "switch" });
       cb.dataset.port = p.id;
       cb.onchange = () => {
-        const picked = [...wrap.querySelectorAll("input")].filter((x) => x.checked).map((x) => x.dataset.port);
+        // (a jack a split holds on keeps its own tick underneath)
+        const mine = state.settings.carrier_outputs || [];
+        const picked = [...wrap.querySelectorAll("input")]
+          .filter((x) => (x.disabled ? mine.includes(x.dataset.port) : x.checked)).map((x) => x.dataset.port);
         sendSettings({ carrier_outputs: picked });
       };
       row.append(cb);
       wrap.appendChild(row);
     }
   }
-  wrap.querySelectorAll("input").forEach((cb) => (cb.checked = on.includes(cb.dataset.port)));
+  const split = state.settings.output_split || "off";
+  // a split needs line out and the combo jack: they're on while it lasts
+  wrap.querySelectorAll("input").forEach((cb) => {
+    const forced = split !== "off" && SPLIT_PORTS.includes(cb.dataset.port);
+    cb.checked = forced || on.includes(cb.dataset.port);
+    cb.disabled = forced;
+  });
+  if (devices.splits && devices.splits.length) fillDeviceSelect($("#split"), "splits", split);
+  $("#split-help").innerHTML = SPLIT_HELP[split] || "";
 }
 
 // what the mic meter means right now

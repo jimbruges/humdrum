@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import queue
 import subprocess
+from collections import deque
 import threading
 import time
 from dataclasses import dataclass
@@ -18,10 +19,70 @@ import numpy as np
 
 import audio_ports
 import bt
-from fx import SR, InputConditioner, make_effects
+from fx import SR, Filter, InputConditioner, make_effects
 from slots import MAX_PADS, SlotBank, pad_label, tidy_recording
 
 log = logging.getLogger("engine")
+
+# Latency. The mic and the output each go through ALSA's PipeWire plugin, which
+# keeps a ring of RING_FRAMES. The engine is clocked by the mic (one block in,
+# one block out), so the audio in flight, waiting in the mic's ring plus queued
+# in the output's, stays constant... until the output runs dry once (a stall):
+# the card plays silence, the mic keeps filling, and from then on everything is
+# that much later. Over a gig the two rings had filled to the top: 163 ms from
+# the mic to the speakers, measured. So the engine now watches both rings
+# (Engine._catch_up) and puts the level back after the output runs dry.
+# Frames per ALSA period, and PipeWire's quantum. 256 takes about 11 ms off the
+# mic's delay but isn't safe for a gig (tested 2026-11-25, with PipeWire
+# realtime): it leaves the engine 5-10 ms per block, a block's processing peaks
+# at 7-9 ms (and more while the web server holds the GIL), and the card's DMA
+# moves audio in 10 ms bursts (period_size 480) under it. It skipped mic audio
+# every 10-40 s, where 512 ran clean.
+IO_PERIOD = 512
+RING_FRAMES = 3072  # each ring's size (64 ms): room for the target, a block and a stall
+# Audio held in flight (mic waiting plus output queued), in periods, as each
+# block is read: the output then never has less than about a period queued.
+TARGET_PERIODS = 2
+TARGET_MAX = 1152  # frames (24 ms): past this, latency costs more than the odd dropout
+RESETTLE_BLOCKS = 8  # blocks the level is watched over before it's put back on target
+SLOW_BLOCK_MS = 12  # a block's processing this slow was held up by another thread: note what they were doing
+
+
+_alsa_periods = 4
+
+
+def _patch_alsa_periods(periods: int) -> None:
+    """Arduino's Microphone and Speaker open their PCMs with pyalsaaudio's
+    default of 4 periods, and the period is the block size. Give their PCMs
+    `periods` periods instead, so the period (PipeWire's quantum) can be small
+    while the ring still holds a stall's worth of audio."""
+    import importlib
+
+    global _alsa_periods
+    _alsa_periods = periods
+    try:
+        import alsaaudio
+    except ImportError:
+        return
+
+    class _Alsa:
+        def __getattr__(self, name):
+            return getattr(alsaaudio, name)
+
+        @staticmethod
+        def PCM(*args, **kwargs):
+            kwargs.setdefault("periods", _alsa_periods)
+            return alsaaudio.PCM(*args, **kwargs)
+
+    for name in ("arduino.app_peripherals.microphone.alsa_microphone", "arduino.app_peripherals.speaker.alsa_speaker"):
+        try:
+            module = importlib.import_module(name)
+            if getattr(module, "alsaaudio", None) is alsaaudio:
+                module.alsaaudio = _Alsa()
+        except Exception as e:
+            log.warning("could not set the ALSA ring size for %s: %s", name, e)
+
+
 MIC_WAIT_S = 0.05    # an empty mic read this long: keep the output going with silence
 MIC_REOPEN_S = 0.5   # this long with no mic data at all: reopen the mic
 # A capture this close to full scale has clipped in the codec: pad the codec's
@@ -87,6 +148,7 @@ class FxChain:
         self.old = None  # the effect being faded out
         self.left = 0  # samples of crossfade still to go
         self.hist = np.zeros(FX_HISTORY, np.float32)
+        self._hist_n = 0  # samples written into hist since the last prime (a ring, see process)
 
     def reset_all(self) -> None:
         for fx in self.effects:
@@ -100,7 +162,7 @@ class FxChain:
             if 0 <= self.index < len(self.effects) and self.effects[self.index] is not new:
                 self.old, self.left = self.effects[self.index], FX_XFADE
             new.reset()  # don't replay whatever was in its buffers last time...
-            new.prime(self.hist)  # ...but start from what's playing now, not silence
+            new.prime(self._recent())  # ...but start from what's playing now, not silence
             self.index = index
         y = self.effects[index].process(x, amount)
         if self.old is not None:
@@ -114,8 +176,19 @@ class FxChain:
             self.left -= k
             if self.left <= 0:
                 self.old = None
-        self.hist = np.concatenate([self.hist[len(x):], x.astype(np.float32)])[-FX_HISTORY:]
+        # a ring: copying all 4096 samples every block cost more than some effects
+        n = min(len(x), FX_HISTORY)
+        at = self._hist_n % FX_HISTORY
+        first = min(n, FX_HISTORY - at)
+        self.hist[at : at + first] = x[len(x) - n : len(x) - n + first]
+        self.hist[: n - first] = x[len(x) - n + first :]
+        self._hist_n += n
         return y
+
+    def _recent(self) -> np.ndarray:
+        """The last FX_HISTORY input samples, oldest first."""
+        at = self._hist_n % FX_HISTORY
+        return np.concatenate([self.hist[at:], self.hist[:at]])
 
     @property
     def current(self):
@@ -215,26 +288,37 @@ class BtInput:
     never waits for it: it takes what's there and plays silence otherwise.
     """
 
-    # A phone sends audio in bursts, on its own clock. Playing whatever has
-    # arrived leaves gaps of silence whenever a burst is late: constant crackle.
-    # So keep a cushion (TARGET_S) before playing, and follow the phone's clock
-    # by resampling very slightly (at most DRIFT) to hold the cushion steady.
-    TARGET_S = 0.08
-    MAX_S = 0.5  # beyond this, drop the oldest audio
+    # A phone sends audio in bursts. Playing whatever has arrived leaves gaps of
+    # silence whenever a burst is late: constant crackle. So keep a cushion
+    # (TARGET_S) before playing. Its latency doesn't matter (the music has no
+    # live input to line up with), and a deep one rides out the radio's bad
+    # moments: a 2.4 GHz hotspot shares the board's antenna with Bluetooth. The
+    # first 80 ms one ran dry as a laptop's stream started (measured).
+    TARGET_S = 0.15
+    MAX_S = 0.8  # beyond this, drop the oldest audio
+    # PipeWire already matches the phone's clock to the sound card's (the phone's
+    # node runs off the mic's driver), so the buffer level holds steady: it's
+    # copied sample for sample, untouched. Only if the level wanders more than
+    # DEADBAND_S from the cushion is it resampled, by at most DRIFT, until it's
+    # back within SETTLE_S, landing on a whole sample to go back to copying.
+    DEADBAND_S = 0.04
+    SETTLE_S = 0.005
     DRIFT = 0.005
     FADE = 128  # samples of fade in/out around a gap
     # A backlog this far above the cushion (audio that piled up while the engine
     # was starting or stalled) is dropped with a short fade. Draining it at the
     # DRIFT limit instead took minutes, all of it played 0.5% (9 cents) sharp.
-    RESYNC_S = 0.15
+    RESYNC_S = 0.3
 
     def __init__(self) -> None:
         self.node: str | None = None
         self.level = 0.0
         self.underruns = 0
         self.resyncs = 0  # times a backlog was dropped (see RESYNC_S)
+        self.resampled_blocks = 0  # blocks read through the resampler rather than copied
         self._buf = np.zeros((0, CHANNELS), np.float32)  # frames x channels
         self._frac = 0.0  # resampling position within _buf
+        self._resampling = False
         self._priming = True
         self._fill = 0.0  # buffer level, smoothed over ~2 s
         self._lock = threading.Lock()
@@ -257,7 +341,7 @@ class BtInput:
                 # start from the newest TARGET_S (anything older piled up while nothing
                 # was reading), with silence before it as the interpolator's history
                 buf = np.concatenate([np.zeros((SINC_BEFORE, CHANNELS), np.float32), buf[-int(target):]])
-                self._priming, self._frac, self._fill = False, 0.0, float(len(buf) - SINC_BEFORE)
+                self._priming, self._frac, self._fill, self._resampling = False, 0.0, float(len(buf) - SINC_BEFORE), False
                 fade_in = True
             else:
                 fade_in = False
@@ -265,10 +349,19 @@ class BtInput:
             # Follow the phone's clock from the *average* buffer level: it jumps with
             # every burst, and steering by that wobbles the pitch (rough sound).
             self._fill += (len(buf) - SINC_BEFORE - self._fill) * min(1.0, n / (2.0 * SR))
-            ratio = 1.0 + float(np.clip((self._fill - target) / target * self.DRIFT, -self.DRIFT, self.DRIFT))
+            err = self._fill - target
+            if not self._resampling and abs(err) > self.DEADBAND_S * SR:
+                self._resampling = True
+            ratio = 1.0
+            if self._resampling:
+                ratio = 1.0 + float(np.clip(err / target * self.DRIFT, -self.DRIFT, self.DRIFT))
+                if abs(err) < self.SETTLE_S * SR:
+                    # back near the cushion: end this block on a whole sample, then copy again
+                    ratio = (round(self._frac + n * ratio) - self._frac) / n
+                    self._resampling = False
             # buf[:SINC_BEFORE] has already been played: it's kept as the sinc's history
-            pos = SINC_BEFORE + self._frac + np.arange(n) * ratio
-            if int(pos[-1]) + SINC_AFTER >= len(buf):  # ran dry: fade out what's left, then build the cushion again
+            last = SINC_BEFORE + self._frac + (n - 1) * ratio
+            if int(last) + SINC_AFTER >= len(buf):  # ran dry: fade out what's left, then build the cushion again
                 self.underruns += 1
                 self._priming = True
                 out = np.zeros((n, CHANNELS), np.float32)
@@ -278,17 +371,26 @@ class BtInput:
                     out[:k] = tail[:k] * np.linspace(1.0, 0.0, k, dtype=np.float32)[:, None]
                 self._buf = np.zeros((0, CHANNELS), np.float32)
                 return out
-            i = pos.astype(np.int64)
-            taps = SINC[np.rint((pos - i) * SINC_PHASES).astype(np.int64)]
-            # the frames this block reads, channels first, so each output sample's
-            # 32 inputs are one contiguous row (the fastest gather on the A53)
-            seg = np.ascontiguousarray(buf[i[0] - SINC_BEFORE : i[-1] + SINC_AFTER + 1].T)
-            rows = np.lib.stride_tricks.sliding_window_view(seg, SINC_TAPS, axis=1)[:, i - i[0]]
-            out = np.einsum("nt,cnt->nc", taps, rows)
-            nxt = pos[-1] + ratio
-            whole = int(nxt)
-            self._frac = nxt - whole
-            self._buf = buf[whole - SINC_BEFORE:]
+            if ratio == 1.0 and self._frac == 0.0:
+                out = buf[SINC_BEFORE : SINC_BEFORE + n].copy()  # bit-exact
+                self._buf = buf[n:]
+            else:
+                self.resampled_blocks += 1
+                pos = SINC_BEFORE + self._frac + np.arange(n) * ratio
+                i = pos.astype(np.int64)
+                taps = SINC[np.rint((pos - i) * SINC_PHASES).astype(np.int64)]
+                # the frames this block reads, channels first, so each output sample's
+                # 32 inputs are one contiguous row (the fastest gather on the A53)
+                seg = np.ascontiguousarray(buf[i[0] - SINC_BEFORE : i[-1] + SINC_AFTER + 1].T)
+                rows = np.lib.stride_tricks.sliding_window_view(seg, SINC_TAPS, axis=1)[:, i - i[0]]
+                out = np.einsum("nt,cnt->nc", taps, rows)
+                nxt = float(pos[-1]) + ratio
+                if abs(nxt - round(nxt)) < 1e-6:  # landed (see SETTLE_S): exactly on a sample
+                    whole, self._frac = int(round(nxt)), 0.0
+                else:
+                    whole = int(nxt)
+                    self._frac = nxt - whole
+                self._buf = buf[whole - SINC_BEFORE:]
             if len(self._buf) - SINC_BEFORE > target + self.RESYNC_S * SR:
                 resync = True
                 self._priming = True  # the next read starts again from the newest audio, faded in
@@ -368,6 +470,11 @@ class Engine:
         self.bt_fx_l, self.bt_fx_r = FxChain(self.bt_effects), FxChain(self.bt_effects_r)
         self.bt_in = BtInput()
         self.limiter = Limiter(CHANNELS)
+        # with the outputs split, a limiter per channel: the mic's peaks mustn't
+        # turn the music down on the other mixer channel, or the other way round
+        self.limiters_split = (Limiter(1), Limiter(1))
+        self._split = "off"
+        self.limit_reduction_db = 0.0
         self._nonfinite_seen: set[str] = set()
         self.cond = InputConditioner()
         self.events: queue.SimpleQueue = queue.SimpleQueue()
@@ -385,8 +492,26 @@ class Engine:
         self.rec_progress = 0.0
         self.recent_out = np.zeros(2048, np.float32)  # for the buzzer pitch tracker
         self.device_status = {"input": "closed", "output": "closed"}
-        # dsp_ms: average time per block in _process; limit_db: recent deepest limiter gain reduction
-        self.stats = {"blocks": 0, "mic_reopens": 0, "last_error": "", "dsp_ms": 0.0, "limit_db": 0.0}
+        # dsp_ms: average time per block in _process (dsp_max_ms: the slowest lately);
+        # limit_db: recent deepest limiter gain reduction; out_underruns: times the
+        # output ran dry; mic_skipped_ms: stale mic audio dropped to stay on time;
+        # io_ms: audio in flight in the two rings (mic waiting + output queued) plus a block;
+        # out_margin_ms: the in-flight level held (see _catch_up)
+        self.stats = {"blocks": 0, "mic_reopens": 0, "last_error": "", "dsp_ms": 0.0, "dsp_max_ms": 0.0, "limit_db": 0.0,
+                      "out_underruns": 0, "mic_skipped_ms": 0, "io_ms": 0.0, "out_margin_ms": 0.0}
+        self._target = TARGET_PERIODS * IO_PERIOD  # frames held in flight (see _catch_up)
+        self._resettle = True  # put the level on target (over the next RESETTLE_BLOCKS)
+        self._levels: list[int] = []
+        self._window: deque = deque(maxlen=16)  # recent levels, for spotting a slow build-up
+        self._pad = 0  # silence to queue ahead of the next block
+        self._out_size = 0  # the output ring's size in frames, once open
+        self._mic_carry = np.zeros(0, np.float32)  # mic frames read past the last block
+        self._opened_at = 0.0
+        self.trace: deque = deque(maxlen=400)  # (time, mic waiting, output queued, margin, dsp ms) per block, for /api/audio/debug
+        self.slow: deque = deque(maxlen=20)  # what the other threads were doing when a block ran slow (/api/audio/debug)
+        self._dsp_peak = (0.0, 0.0)  # (slowest block, when)
+        self._period = IO_PERIOD
+        Filter.warm(int(self.s.get("block", 512)))  # every knob position, designed now rather than mid-song
         self.level_raw = 0.0  # mic before gain and gate, to show the input is alive
         self.level_play = 0.0  # samples + Bluetooth only, for the output meter
         self.level_mic_out = 0.0  # the mic after its effect and volume
@@ -438,7 +563,9 @@ class Engine:
     # -- devices ---------------------------------------------------------------
 
     def _open(self) -> None:
-        block = int(self.s.get("block", 512))
+        period = max(64, min(int(self.s.get("io_period", IO_PERIOD)), int(self.s.get("block", 512))))
+        self._period = period
+        _patch_alsa_periods(max(2, RING_FRAMES // period))
         carrier = audio_ports.is_carrier(str(self.s.get("output_device", ""))) or audio_ports.is_carrier(str(self.s.get("input_device", "")))
         if carrier:
             audio_ports.ensure_carrier_profile()
@@ -447,12 +574,18 @@ class Engine:
             from arduino.app_peripherals.speaker import Speaker
 
             # float32 stereo: no 16-bit rounding on the way to the 24-bit codec
-            self._spk = Speaker(self.s.get("output_device", Speaker.JACK_SPEAKER_1), sample_rate=SR, channels=CHANNELS, format=np.float32, buffer_size=block)
+            self._spk = Speaker(self.s.get("output_device", Speaker.JACK_SPEAKER_1), sample_rate=SR, channels=CHANNELS, format=np.float32, buffer_size=period)
             self._spk.start()
             self.device_status["output"] = "open"
+            try:
+                self._out_size = int(self._spk._pcm.info()["buffer_size"])
+            except Exception:
+                self._out_size = 0  # no fill levels from this device: no latency control
+            self._target = TARGET_PERIODS * period
+            self._resettle = True
             if audio_ports.is_carrier(str(self.s.get("output_device", ""))):
                 audio_ports.hp_gain = int(self.s.get("hp_gain", audio_ports.hp_gain))
-                audio_ports.apply_ports(list(self.s.get("carrier_outputs", [])))
+                audio_ports.apply_ports(audio_ports.ports_for(self.s.get("carrier_outputs", []), str(self.s.get("output_split", "off"))))
         except Exception as e:
             log.warning("output device: %s", e)
             self._spk = None
@@ -461,8 +594,9 @@ class Engine:
             from arduino.app_peripherals.microphone import Microphone
 
             # float32: keeps the codec's 24 bits (the gain and filters run after this)
-            self._mic = Microphone(self.s.get("input_device", Microphone.JACK_MIC_1), sample_rate=SR, channels=1, format=np.float32, buffer_size=block)
+            self._mic = Microphone(self.s.get("input_device", Microphone.JACK_MIC_1), sample_rate=SR, channels=1, format=np.float32, buffer_size=period)
             self._mic.start()
+            self._mic_carry = np.zeros(0, np.float32)
             self.device_status["input"] = "open"
             self._mic_carrier = audio_ports.is_carrier(str(self.s.get("input_device", "")))
             if self._mic_carrier:
@@ -514,6 +648,144 @@ class Engine:
         top = float(np.iinfo(fmt).max)
         return np.ascontiguousarray(np.clip(np.rint(y * top), -top - 1, top).astype(fmt))
 
+    # -- latency control -----------------------------------------------------
+
+    def _mic_waiting(self) -> int | None:
+        """Mic frames already captured and not yet read (None: can't tell)."""
+        try:
+            return int(self._mic._pcm.avail()) + len(self._mic_carry)
+        except Exception:
+            return None
+
+    def _out_queued(self) -> int | None:
+        """Frames queued in the output's ring; below 0 once it has run dry (None: can't tell)."""
+        if not self._out_size:
+            return None
+        try:
+            return self._out_size - int(self._spk._pcm.avail())
+        except Exception:
+            return None
+
+    def _read_mic(self, n: int) -> np.ndarray | None:
+        """Exactly `n` mic frames (the mic is read a period at a time), or None if
+        it had nothing just now. Raises if the device failed."""
+        carry = self._mic_carry
+        while len(carry) < n:
+            chunk = self._mic.capture()
+            if chunk is None or not chunk.size:
+                self._mic_carry = carry
+                return None
+            x = chunk.reshape(-1)
+            if x.dtype.kind == "f":
+                x = x.astype(np.float32, copy=False)
+            else:  # a device that fell back to an integer format
+                x = x.astype(np.float32) / float(np.iinfo(x.dtype).max + 1)
+            carry = np.concatenate([carry, x]) if len(carry) else x
+        self._mic_carry = carry[n:]
+        return carry[:n]
+
+    def _catch_up(self, x: np.ndarray) -> np.ndarray:
+        """Hold the audio in flight (mic waiting plus output queued) at its target.
+
+        In steady running it can't change: one block in, one block out, on one
+        clock. It grows when the output runs dry: the card plays silence while
+        the mic keeps capturing, and from then on everything is that much later
+        (over a gig, 163 ms from mic to speakers). PipeWire's ALSA plugin shows
+        that as a negative fill (its play position runs ahead of the writes)
+        until the next write restarts it. So after a dry spell, and once after
+        opening the devices, the level is put back on target: stale mic audio
+        dropped, or silence queued. Otherwise it's left alone. (Trimming it on
+        level readings alone dropped audio that had never been late: the levels
+        move in whole periods, at moments that fall differently against the
+        mic's and the output's ticks.)
+
+        Each dry spell also widens the target by half a period (up to
+        TARGET_MAX): the engine was held up for longer than it covered.
+
+        The music isn't skipped to match: it has already paused for the time the
+        output ran dry, and its own cushion takes the difference."""
+        waiting, queued = self._mic_waiting(), self._out_queued()
+        if waiting is None or queued is None:
+            return x
+        block = len(x)
+        self.trace.append((round(time.monotonic(), 4), waiting, queued, self._target, round(self.stats["dsp_ms"], 1)))
+        settled = time.monotonic() - self._opened_at > 3.0
+        if queued < 0:
+            self._levels.clear()
+            self._window.clear()
+            if settled and not self._resettle:
+                self.stats["out_underruns"] += 1
+                self._target = max(self._target, min(self._target + self._period // 2, TARGET_MAX))
+                log.info("output ran dry for %d ms: holding %d ms in flight from now on", -queued * 1000 // SR, self._target * 1000 // SR)
+            self._resettle = True
+            return x
+        in_flight = waiting + queued
+        self.stats["io_ms"] = round(self.stats["io_ms"] * 0.95 + (in_flight + block) / SR * 1e3 * 0.05, 1)
+        self.stats["out_margin_ms"] = round(self._target * 1000 / SR, 1)
+        if not self._resettle:
+            # A stall can also lift the level without the fill ever going negative
+            # (PipeWire's output graph itself missing cycles: nothing is played, and
+            # the mic piles up). The level's lowest over a window, two periods above
+            # target, can't be the ticks' phase: put it back then too.
+            self._window.append(in_flight)
+            if len(self._window) < self._window.maxlen or min(self._window) < self._target + 2 * self._period:
+                return x
+            self._window.clear()
+            if settled:
+                self.stats["out_underruns"] += 1
+                log.info("the mic was falling %d ms behind: putting it back", (in_flight - self._target) * 1000 // SR)
+            self._resettle = True
+            return x
+        # the level moves in whole periods with the two ticks' phase: judge it by
+        # its lowest over a few blocks, so the output still has the target then
+        self._levels.append(in_flight)
+        if len(self._levels) < RESETTLE_BLOCKS:
+            return x
+        low = min(self._levels)
+        self._levels.clear()
+        self._resettle = not settled  # (keep at it while the devices are starting up)
+        diff = low - self._target
+        if diff < 0:
+            self._pad = -diff  # queued as silence ahead of this block
+            return x
+        drop = diff // self._period * self._period
+        if drop <= 0:
+            return x
+        # (if less than `drop` is waiting this read waits for the rest, which the
+        # output's excess covers)
+        newer = self._read_mic(drop)
+        if newer is None:
+            return x
+        if settled:
+            self.stats["mic_skipped_ms"] += int(drop * 1000 / SR)
+        return np.concatenate([x, newer])[-block:]  # the newest block; the oldest `drop` frames are gone
+
+    def _note_slow(self, took: float) -> None:
+        """A block that took far longer than its processing needs was kept off the
+        CPU, almost always by another thread holding the GIL. Note where the
+        other threads are: the one that held it is usually still there."""
+        import sys
+
+        me = threading.get_ident()
+        names = {t.ident: t.name for t in threading.enumerate()}
+        where = {}
+        for ident, frame in sys._current_frames().items():
+            if ident == me:
+                continue
+            stack = []
+            while frame is not None and len(stack) < 4:
+                stack.append(f"{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno} {frame.f_code.co_name}")
+                frame = frame.f_back
+            where[names.get(ident, str(ident))] = stack
+        self.slow.append({"t": round(time.monotonic(), 3), "ms": round(took, 1), "threads": where})
+
+    def _write(self, y: np.ndarray) -> None:
+        """Play a block, after any silence _catch_up wants queued first."""
+        if self._pad:
+            self._spk.play(self._to_device(np.zeros((self._pad, CHANNELS), np.float32)))
+            self._pad = 0
+        self._spk.play(self._to_device(y))
+
     def _loop(self) -> None:
         last_try = 0.0
         while self._run:
@@ -525,30 +797,23 @@ class Engine:
                 last_try = time.monotonic()
                 self._close()
                 self._open()
-                self._mic_ok_at = time.monotonic()
-                if self._spk:
-                    # a little pre-roll so the first blocks don't underrun
-                    silence = np.zeros((int(self.s.get("block", 512)) * 2, CHANNELS), np.float32)
-                    self._spk.play(self._to_device(silence))
+                self._mic_ok_at = self._opened_at = time.monotonic()
+                self._levels.clear()
 
             block = int(self.s.get("block", 512))
             x = None
             if self._mic is not None:
                 try:
-                    chunk = self._mic.capture()
+                    x = self._read_mic(block)
                 except Exception as e:
                     log.warning("mic read failed: %s", e)
                     self.stats["last_error"] = f"mic: {e}"
                     self._mic = None
                     continue
                 now = time.monotonic()
-                if chunk is not None and chunk.size:
+                if x is not None:
                     self._mic_ok_at = now
-                    x = chunk.reshape(-1)
-                    if x.dtype.kind == "f":
-                        x = x.astype(np.float32, copy=False)
-                    else:  # a device that fell back to an integer format
-                        x = x.astype(np.float32) / float(np.iinfo(x.dtype).max + 1)
+                    x = self._catch_up(x)
                 elif now - self._mic_ok_at < MIC_WAIT_S:
                     time.sleep(0.001)
                     continue
@@ -581,17 +846,24 @@ class Engine:
                 y = np.zeros((len(x), CHANNELS), np.float32)
             st = self.stats
             st["blocks"] += 1
-            st["dsp_ms"] = round(st["dsp_ms"] * 0.98 + (time.perf_counter() - t0) * 1e3 * 0.02, 2)
-            st["limit_db"] = round(max(self.limiter.reduction_db, st["limit_db"] * 0.99), 1)
+            took = (time.perf_counter() - t0) * 1e3
+            st["dsp_ms"] = round(st["dsp_ms"] * 0.98 + took * 0.02, 2)
+            now = time.monotonic()
+            if took >= self._dsp_peak[0] or now - self._dsp_peak[1] > 5:
+                self._dsp_peak = (took, now)  # the slowest block in the last ~5 s
+            st["dsp_max_ms"] = round(self._dsp_peak[0], 1)
+            st["limit_db"] = round(max(self.limit_reduction_db, st["limit_db"] * 0.99), 1)
 
             if self._spk is not None:
                 try:
-                    self._spk.play(self._to_device(y))
+                    self._write(y)
                 except Exception as e:
                     log.warning("speaker write failed: %s", e)
                     self._spk = None
             elif self._mic is None:
                 time.sleep(len(x) / SR)  # nothing is clocking us
+            if took > SLOW_BLOCK_MS:
+                self._note_slow(took)  # (after the write: it costs about a millisecond)
 
     def _process(self, x: np.ndarray) -> np.ndarray:
         s = self.s
@@ -647,14 +919,14 @@ class Engine:
         # Bluetooth/pads meter dark unless the knob was at full.
         self.level_mic_out = max(float(np.max(np.abs(wet))) * monitor, self.level_mic_out * 0.85)
         self.level_play = max(float(np.max(np.abs(play))), self.level_play * 0.85)
-        out = (play + (wet * monitor)[:, None]) * master
+        out = self._route(play, wet * monitor) * master
         if self.tone_buf is not None:
             seg = self.tone_buf[self.tone_pos : self.tone_pos + len(out)]
             out[: len(seg)] += seg[:, None]
             self.tone_pos += len(out)
             if self.tone_pos >= len(self.tone_buf):
                 self.tone_buf = None
-        out = self.limiter.process(out)  # never past full scale
+        out = self._limit(out)  # never past full scale
         self.level_raw = max(float(np.max(np.abs(x))) if len(x) else 0.0, self.level_raw * 0.85)
 
         mono = out.mean(axis=1)
@@ -662,6 +934,42 @@ class Engine:
         self.recent_out = np.concatenate([self.recent_out[n:], mono[-n:]])
         self.level_in = max(float(np.max(np.abs(dry))), self.level_in * 0.85)
         self.level_out = max(float(np.max(np.abs(out))), self.level_out * 0.85)
+        return out
+
+    def _route(self, play: np.ndarray, voice: np.ndarray) -> np.ndarray:
+        """The output's two channels. Mixed: the music in stereo with the mic in the
+        middle. Split (settings "output_split"): the mic on one channel, the music
+        summed to mono on the other; the left channel is what line out plays.
+        Mixed with only line out or ear out playing, the mix is summed to mono:
+        both are fed from the left channel, and the music's right would be lost."""
+        split = str(self.s.get("output_split", "off"))
+        if split in ("mic_line", "music_line"):
+            music = play.mean(axis=1)
+            return np.stack((voice, music) if split == "mic_line" else (music, voice), axis=1)
+        out = play + voice[:, None]
+        if self._left_only:
+            out[:] = out.mean(axis=1, keepdims=True)
+        return out
+
+    @property
+    def _left_only(self) -> bool:
+        return audio_ports.is_carrier(str(self.s.get("output_device", ""))) and audio_ports.left_only(
+            audio_ports.ports_for(self.s.get("carrier_outputs", []), str(self.s.get("output_split", "off"))))
+
+    def _limit(self, out: np.ndarray) -> np.ndarray:
+        split = str(self.s.get("output_split", "off"))
+        split = split if split in ("mic_line", "music_line") else "off"
+        if split != self._split:  # start the limiters taking over clean
+            self._split = split
+            self.limiter = Limiter(CHANNELS)
+            self.limiters_split = (Limiter(1), Limiter(1))
+        if split == "off":
+            out = self.limiter.process(out)
+            self.limit_reduction_db = self.limiter.reduction_db
+            return out
+        a, b = self.limiters_split
+        out = np.concatenate([a.process(out[:, :1]), b.process(out[:, 1:])], axis=1)
+        self.limit_reduction_db = max(a.reduction_db, b.reduction_db)
         return out
 
     def _mic_clipped(self) -> None:

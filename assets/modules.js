@@ -17,6 +17,8 @@ const socket = io({ transports: ["websocket", "polling"] });
 socket.on("connect", () => $("#conn").classList.remove("off"));
 socket.on("disconnect", () => $("#conn").classList.add("off"));
 socket.on("state", (s) => { state = s; render(); });
+// knob turns and sliders send just the settings (and audio stats), merged into the last full state
+socket.on("settings", (s) => { if (state) { Object.assign(state, s); render(); } });
 socket.on("meter", (m) => { meter = m; renderLive(); });
 socket.on("device", onDevice);
 

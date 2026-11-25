@@ -73,10 +73,11 @@ The carrier has three 3.5 mm jacks: **Line Out** (mono, balanced), **Mic In / He
 **The audio settings** (settings → *audio in / out*):
 
 - **Mic input**: the Media Carrier's combo-jack mic, or a USB mic if one is plugged in. The *mic* meter under it shows the raw input level, and the line below says in plain words what's wrong if the input is silent or so noisy that the noise gate is muting it.
-- **Output**: the Media Carrier, or a USB audio device. With the Media Carrier, tick which jacks play: **headphones** (the combo jack), **line out** and **ear out**, in any combination. They all carry the same mono mix.
+- **Output**: the Media Carrier, or a USB audio device. With the Media Carrier, tick which jacks play: **headphones** (the combo jack, stereo), **line out** and **ear out** (both mono), in any combination. Line out and ear out play the left channel, so with only those ticked the mix is summed to mono.
+- **Mic and music** splits the two onto separate mixer channels: *mic on line out* puts the mic on line out and the music (Bluetooth and pads, mono) on the headphone jack's **right** channel, and *music on line out* swaps them. Take the right channel with a 3.5 mm stereo-to-two-mono cable (to two RCA plugs or two jacks), the right (red) leg; the headphone jack's left channel carries the same as line out. Each side gets its own limiter, so a loud mic doesn't turn the music down.
 - **Test tone** plays a short beep on the ticked jacks at a fixed level (about −12 dBFS), whatever the master and sample levels are set to.
 
-How it works: the app keeps the sound card on PipeWire's *Headphones* profile, which is the only one that routes the mic. Line out and ear out are switched on alongside it with the codec switches from Arduino's [Media Carrier user manual](https://docs.arduino.cc/tutorials/uno-media-carrier/user-manual/). The headphone path itself has to stay powered while audio is streaming (switching it off stalls the sound card), so unticking *headphones* mutes the combo jack's amplifier instead. The mic's capture gain is set to the manual's recording values (`ADC2 Volume` 5, `TX_DEC0 Volume` 100); PipeWire otherwise leaves the digital gain at +40 dB.
+How it works: the app keeps the sound card on PipeWire's *Headphones* profile, which is the only one that routes the mic. Line out and ear out are switched on alongside it with the codec switches from Arduino's [Media Carrier user manual](https://docs.arduino.cc/tutorials/uno-media-carrier/user-manual/). The headphone path itself has to stay powered while audio is streaming (switching it off stalls the sound card), so unticking *headphones* mutes the combo jack's amplifier instead. The mic's capture gain is held low in the codec (`ADC2 Volume` 0, `TX_DEC0 Volume` 78, 6 dB under unity) so a loud voice has headroom, and the app adds its own gain after the rumble filter. A mic hot enough to clip the codec anyway pads `TX_DEC0` down by itself, in steps (*mic input pad* in settings).
 
 **Mic plugs.** The mic input is on the combo jack, which follows the phone-headset (CTIA) layout: tip and ring are the **headphone outputs**, the sleeve is the mic. A 3-pole TRS mic plug puts its mic wire on a headphone output, so the mic capsule plays the output back at you, and it records nothing but hum. Use a TRS-to-TRRS (CTIA) mic adapter. Until then, untick *headphones* so the combo jack stays quiet.
 
@@ -191,6 +192,8 @@ Pair your phone with **HUMDRUM** (no PIN) and its music plays through Humdrum in
 
 It needs the Bluetooth installer and Arduino's 7.0.14 kernel or newer; see *Deploying*.
 
+The music is copied sample for sample from the Bluetooth decoder to the output (PipeWire already locks the phone's clock to the sound card's), behind a 150 ms cushion that rides out the radio's bad moments. That delay doesn't matter: nothing live has to line up with the music.
+
 ### Module roles
 
 Each module's job is set on the web UI's **modules** page (settings → *modules*), so you can rearrange the lid without touching code:
@@ -209,12 +212,15 @@ Each module's job is set on the web UI's **modules** page (settings → *modules
    ```bash
    sudo reboot
    ```
-3. **Bluetooth and audio.** Run once on the board. It installs the pairing helper (`humdrum-bt`), the PipeWire/WirePlumber rules that bring the phone's music into the app (and keep the codec on 16-bit, which fixes the hissy 24-bit mode), and sets Bluetooth to classic only:
+3. **Bluetooth and audio.** Run once on the board, then reboot. It installs the pairing helper (`humdrum-bt`), the PipeWire/WirePlumber rules that bring the phone's music into the app (and keep the codec on 16-bit, which fixes the hissy 24-bit mode), sets Bluetooth to classic only and to a music receiver only (no headset profile, so a laptop or phone never drops to call-quality audio, and a phone call never goes out through the PA), gives the audio server realtime priority and keeps the CPU at full speed (without those, a busy moment made the sound click):
    ```bash
    cd humdrum/host/bluetooth && sudo ./install.sh
    ```
-   Add `NAME="My Humdrum"` before `./install.sh` to change the name your phone sees.
-4. **Audio devices.** The defaults are the Media Carrier's mic and all three of its jacks. Change them in the web UI under settings → *audio in / out* (see *The audio settings* above). *System* shows whether the devices are open, how many audio blocks have run, and the last audio error.
+   ```bash
+   sudo reboot
+   ```
+   Add `NAME="My Humdrum"` before `./install.sh` to change the name your phone sees. A phone or laptop paired before this: forget HUMDRUM on it and pair again.
+4. **Audio devices.** The defaults are the Media Carrier's mic and its headphone (combo) jack. Change them in the web UI under settings → *audio in / out* (see *The audio settings* above). *System* shows whether the devices are open, how many audio blocks have run, and the last audio error.
 5. **Hotspot + captive portal.** On the board (over SSH or `adb shell`):
    ```bash
    cd humdrum/host/portal && sudo ./install.sh
@@ -316,8 +322,11 @@ Print the tray once in draft quality to check the jacks and USB-C before printin
 ## What's been verified
 
 - **Sketch** compiles for `arduino:zephyr:unoq`: 13 % flash, 17 % RAM.
-- **Python** effects, slots, engine, recording, loop/gate/one-shot and the pitch tracker were tested offline (`numpy`/`scipy`). A full block takes about 0.1 ms of a 10.7 ms budget on a desktop CPU. The QRB2210's A53 cores will be several times slower, which still leaves plenty of headroom.
+- **Python** effects, slots, engine, recording, loop/gate/one-shot and the pitch tracker were tested offline (`numpy`/`scipy`). On the board a 512-sample block (10.7 ms of audio) takes about 3.3 ms on average with Bluetooth playing, and 7-9 ms at its slowest.
 - **Web UI + REST API** were run end to end against a stub of the App Lab runtime: upload with in-browser decode, edit, swap, delete, settings, and phone-width layout.
 - **CAD**: every feature was checked against computed volumes, all 4 widths regenerate with no errors, the exported STL sizes match the table, and the QR raster round-trips to the exact symbol.
 
-**Not yet tested on real hardware:** audio device naming and latency on the Media Carrier, Modulino auto-addressing with several real modules, the hotspot/portal on the board, and physical fit.
+- **Audio on the board** (Media Carrier, 2026-11-24/25): the mic's delay through the app is about 33 ms (it was 163 ms mic to speakers after a gig, measured acoustically); about 89 ms more is in the sound card, the Qualcomm DSP and the speakers. Bluetooth music comes out bit-exact, with no clicks over 50-70 s of a test tone, also while the effect knob is swept through every effect 20 times a second. A 256-frame period was tried and dropped: it saved 11 ms but skipped mic audio every 10-40 s. The *mic and music* split was checked on the output stream: each signal on its own channel, nothing on the other. How it was measured: `docs/handoff-audio-quality.md`.
+- **The whole unit at a gig** (2026-11): seven Buttons modules, two Knobs, two Pixels and a Distance on one Qwiic chain, the hotspot and portal, Bluetooth from a phone and a laptop, and the printed case.
+
+**Not yet tested:** the line out, and the *mic and music* split, into a mixer by ear.

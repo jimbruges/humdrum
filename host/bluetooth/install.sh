@@ -10,6 +10,9 @@
 #     straight to the speakers
 #   * humdrum-bt, a small service that keeps the board discoverable, accepts
 #     phones without a PIN and passes play/pause/previous/next to the phone
+#   * realtime priority for the app's audio server, and the CPU at full speed
+#     (clicks and a growing mic delay otherwise)
+#   * Bluetooth as a music receiver only (A2DP), no headset profile
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -26,6 +29,55 @@ install -d -o arduino -g arduino "$APP_DIR/data"
 # Keep that session running with nobody logged in, or the board loses all
 # audio when the last login (an adb or SSH shell) closes.
 loginctl enable-linger arduino
+
+echo "==> realtime priority for the audio"
+# That session's PipeWire (the one with the sound card) runs from a lingering
+# systemd user manager, with no login. rtkit only grants realtime priority inside
+# an active session, so PipeWire's audio thread ran as an ordinary process and
+# missed its 5-10 ms deadlines whenever the CPU was busy: clicks, and a mic that
+# fell further behind with each one. With these limits PipeWire sets its own
+# realtime priority, as it does for a desktop login. (Takes effect after a reboot.)
+APP_UID=$(id -u arduino)
+install -d "/etc/systemd/system/user@$APP_UID.service.d"
+cat > "/etc/systemd/system/user@$APP_UID.service.d/90-humdrum-realtime.conf" <<CONF
+[Service]
+LimitRTPRIO=95
+LimitNICE=-19
+LimitMEMLOCK=infinity
+CONF
+# and in case PipeWire asks rtkit instead of setting it itself
+if [[ -d /etc/polkit-1/rules.d ]]; then
+  cat > /etc/polkit-1/rules.d/90-humdrum-rtkit.rules <<'RULES'
+// Humdrum: the app's audio server (user arduino) runs without a login session;
+// let rtkit give it realtime priority all the same.
+polkit.addRule(function (action, subject) {
+  if ((action.id == "org.freedesktop.RealtimeKit1.acquire-real-time" ||
+       action.id == "org.freedesktop.RealtimeKit1.acquire-high-priority") && subject.user == "arduino") {
+    return polkit.Result.YES;
+  }
+});
+RULES
+fi
+
+echo "==> CPU cores at full speed"
+# The cores scale their clock with the load (schedutil). The audio thread works
+# in short bursts, about half a core, and a block that landed on a core clocked
+# down to 0.6-1 GHz took two or three times as long: late audio.
+cat > /etc/systemd/system/humdrum-cpu.service <<'UNIT'
+[Unit]
+Description=Humdrum: CPU cores at full speed, for steady audio timing
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g"; done'
+ExecStop=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo schedutil > "$g"; done'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now humdrum-cpu.service
 
 # Classic Bluetooth only. The board's WCN399x controller hangs on routine HCI
 # commands now and then and needs a reboot (four times on 2026-11-17; one was in
@@ -102,6 +154,17 @@ monitor.alsa.rules = [
 ]
 CONF
 chown arduino:arduino "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/82-humdrum-s16.conf"
+# A music receiver only: no headset (HFP/HSP) role. With it, HUMDRUM offered
+# phones and laptops a microphone too: a Mac made it its default input, and the
+# moment any app opened a mic the link would drop from A2DP stereo to 16 kHz mono
+# call audio. A phone call would also have gone out through the PA.
+cat > "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/83-humdrum-a2dp-only.conf" <<'CONF'
+monitor.bluez.properties = {
+  bluez5.roles = [ a2dp_sink ]
+  bluez5.hfphsp-backend = "none"
+}
+CONF
+chown arduino:arduino "$APP_USER_HOME/.config/wireplumber/wireplumber.conf.d/83-humdrum-a2dp-only.conf"
 
 # The login screen (lightdm) runs its own audio session, which does own the seat
 # and would grab the phone's music before the app's session can. Keep it off Bluetooth.
@@ -135,6 +198,9 @@ systemctl --machine=arduino@.host --user restart wireplumber.service 2>/dev/null
 
 cat <<DONE
 
-Done. On your phone, open Bluetooth settings and connect to "$NAME".
+Done. Reboot for the realtime audio priority to take effect:
+  sudo reboot
+Then, on your phone or laptop, connect to "$NAME". If it was paired before,
+"forget" it there and pair again, so it stops treating it as a headset.
 The app shows the phone under settings -> bluetooth once it's connected.
 DONE

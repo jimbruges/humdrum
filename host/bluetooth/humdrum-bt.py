@@ -11,7 +11,8 @@ It talks to the app over a Unix socket in the app's data folder, which the
 container shares: one JSON request per line, one JSON reply per line.
   {"cmd": "status"}  {"cmd": "next"}  {"cmd": "discoverable", "on": false}
 
-Only standard tools are used: bluetoothctl for the agent, busctl for D-Bus.
+Only standard tools are used: bluetoothctl for the agent, busctl for D-Bus
+(one GetManagedObjects call for everything there is to know).
 """
 
 from __future__ import annotations
@@ -52,6 +53,24 @@ def objects() -> list[str]:
     except (OSError, subprocess.SubprocessError):
         return []
     return [line.strip() for line in out.splitlines() if line.strip().startswith("/org/bluez/")]
+
+
+def managed() -> dict[str, dict]:
+    """Every BlueZ object with its properties, in one D-Bus call:
+    {path: {interface: {name: value}}}. Reading them one busctl at a time (ten
+    processes a status, and the app asks twice a second) kept dbus-daemon busy
+    on a quarter of a core, CPU the audio needs."""
+    r = busctl("call", "org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects")
+    try:
+        raw = r["data"][0]
+        return {path: {iface: {k: v.get("data") for k, v in props.items()} for iface, props in ifaces.items()}
+                for path, ifaces in raw.items()}
+    except (TypeError, KeyError, IndexError, AttributeError):
+        return {}
+
+
+def get(objs: dict, path: str, iface: str, name: str):
+    return objs.get(path, {}).get(iface, {}).get(name)
 
 
 def adapter(paths: list[str] | None = None) -> str:
@@ -127,9 +146,10 @@ def look_after_phones() -> None:
     turned_up: set[str] = set()
     known, power_tried = "", 0.0
     while True:
-        paths = objects()
+        objs = managed()
+        paths = list(objs) or objects()
         ad = adapter(paths)
-        powered = prop(ad, "org.bluez.Adapter1", "Powered")
+        powered = get(objs, ad, "org.bluez.Adapter1", "Powered") if objs else prop(ad, "org.bluez.Adapter1", "Powered")
         if powered is False and time.monotonic() - power_tried > POWER_RETRY_S:
             # bluetoothd powers a working controller up itself; this is for one
             # that came back after a reset. Once a minute at most: each attempt
@@ -137,12 +157,12 @@ def look_after_phones() -> None:
             power_tried = time.monotonic()
             print(f"adapter {ad} is off: asking it to power on", flush=True)
             busctl("set-property", "org.bluez", ad, "org.bluez.Adapter1", "Powered", "b", "true")
-        elif powered is True and (ad != known or prop(ad, "org.bluez.Adapter1", "Pairable") is False):
+        elif powered is True and (ad != known or get(objs, ad, "org.bluez.Adapter1", "Pairable") is False):
             if restore_adapter(ad):
                 known = ad
         for p in paths:
             if (DEVICE_RE.fullmatch(p)
-                    and prop(p, "org.bluez.Device1", "Paired") and not prop(p, "org.bluez.Device1", "Trusted")):
+                    and get(objs, p, "org.bluez.Device1", "Paired") and get(objs, p, "org.bluez.Device1", "Trusted") is False):
                 busctl("set-property", "org.bluez", p, "org.bluez.Device1", "Trusted", "b", "true")
             if re.search(r"/fd\d+$", p) and p not in turned_up:
                 turned_up.add(p)  # once per connection: the phone's buttons still work afterwards
@@ -152,20 +172,21 @@ def look_after_phones() -> None:
 
 
 def status() -> dict:
-    paths = objects()
+    objs = managed()
+    paths = list(objs)
     ad = adapter(paths)
-    st = {"powered": bool(prop(ad, "org.bluez.Adapter1", "Powered")),
-          "discoverable": bool(prop(ad, "org.bluez.Adapter1", "Discoverable")),
+    st = {"powered": bool(get(objs, ad, "org.bluez.Adapter1", "Powered")),
+          "discoverable": bool(get(objs, ad, "org.bluez.Adapter1", "Discoverable")),
           "connected": False, "device": "", "playing": False, "title": "", "artist": "",
           "_device_path": "", "_player": ""}
     for p in paths:
-        if DEVICE_RE.fullmatch(p) and prop(p, "org.bluez.Device1", "Connected"):
-            st.update(connected=True, device=prop(p, "org.bluez.Device1", "Alias") or "", _device_path=p)
-            players = [q for q in paths if q.startswith(p + "/player")]
+        if DEVICE_RE.fullmatch(p) and get(objs, p, "org.bluez.Device1", "Connected"):
+            st.update(connected=True, device=get(objs, p, "org.bluez.Device1", "Alias") or "", _device_path=p)
+            players = [q for q in paths if q.startswith(p + "/player") and "org.bluez.MediaPlayer1" in objs[q]]
             if players:
                 st["_player"] = players[0]
-                st["playing"] = prop(players[0], "org.bluez.MediaPlayer1", "Status") == "playing"
-                track = prop(players[0], "org.bluez.MediaPlayer1", "Track") or {}
+                st["playing"] = get(objs, players[0], "org.bluez.MediaPlayer1", "Status") == "playing"
+                track = get(objs, players[0], "org.bluez.MediaPlayer1", "Track") or {}
                 st["title"] = (track.get("Title") or {}).get("data", "")
                 st["artist"] = (track.get("Artist") or {}).get("data", "")
             break

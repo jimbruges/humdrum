@@ -78,16 +78,28 @@ class Bluetooth:
 
 
 def audio_node() -> str | None:
-    """PipeWire node name of a connected phone's A2DP stream, if there is one."""
+    """PipeWire node name of a connected phone's A2DP stream, if there is one.
+
+    Asked every 2 s while no phone is playing. It used `pw-dump`, whose 160 KB
+    of JSON took json.loads 15 ms to parse with the GIL held: longer than the
+    output's margin, so the audio thread fell late every 2 s. `pw-cli ls Node`
+    prints the same names in 2 KB of text."""
     import subprocess
 
     try:
-        objs = json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5).stdout)
+        out = subprocess.run(["pw-cli", "ls", "Node"], capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return None
-    for o in objs:
-        props = o.get("info", {}).get("props", {})
-        name = str(props.get("node.name", ""))
+    nodes: list[dict] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("id "):
+            nodes.append({})
+        elif "=" in line and nodes:
+            key, _, value = line.partition("=")
+            nodes[-1][key.strip()] = value.strip().strip('"')
+    for props in nodes:
+        name = props.get("node.name", "")
         if name.startswith("bluez_input.") or (name.startswith("bluez_") and props.get("media.class") in ("Audio/Source", "Stream/Output/Audio")):
             return name
     return None

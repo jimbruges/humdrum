@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 
 log = logging.getLogger("humdrum.audio")
 
@@ -27,6 +28,35 @@ PORTS = {
 # to the speaker then blocks for good (tested on the board). So the combo jack
 # is muted with its amplifier gain instead, where 0 is the codec's mute step.
 EXTRA_SWITCHES = {"lineout": "LO_RDAC Switch", "earphone": "EAR_RDAC Switch"}
+# Line out and ear out are fed from the left channel's DAC: the carrier's UCM
+# routes them through HPHL with only RX0 (the left channel) connected
+# (Lineout.conf / Earphones.conf, rx-macro HeadphoneLEnableSeq). So the jacks
+# carry at most two different signals: the left channel (line out, ear out and
+# the combo jack's tip) and the right (the combo jack's ring, on its own).
+LEFT_ONLY = ("lineout", "earphone")
+# What the two channels carry (settings "output_split"): the mix on both, or the
+# mic and the music (Bluetooth and sample pads) on one channel each.
+SPLITS = {
+    "off": "Same mix on every jack",
+    "mic_line": "Mic on line out, music on the headphone jack's right channel",
+    "music_line": "Music on line out, mic on the headphone jack's right channel",
+}
+
+
+def ports_for(outputs: list[str], split: str = "off") -> list[str]:
+    """The jacks that play: the ones picked, and with the outputs split, line
+    out and the combo jack too (the right channel only comes out of the combo
+    jack, the left out of all three)."""
+    picked = set(outputs or [])
+    if split in SPLITS and split != "off":
+        picked |= {"headphones", "lineout"}
+    return [p for p in PORTS if p in picked]
+
+
+def left_only(ports: list[str]) -> bool:
+    """Only jacks fed from the left channel play: a stereo mix would lose its
+    right channel there, so it's summed to mono."""
+    return bool(ports) and all(p in LEFT_ONLY for p in ports)
 HP_ALWAYS_ON = ("HPHL_RDAC Switch", "HPHR_RDAC Switch", "HPHL Switch", "HPHR Switch")
 HP_VOLUMES = ("HPHL Volume", "HPHR Volume")
 HP_GAIN_MUTE = "0"
@@ -138,24 +168,61 @@ def _carrier_device(objs: list[dict]) -> dict | None:
     return None
 
 
+CARRIER_NODES = ("alsa_output.platform-sound.Headphones__Headphones__sink",
+                 "alsa_input.platform-sound.Headphones__Headset__source")
+
+
+def carrier_nodes_missing() -> list[str]:
+    """The carrier's PipeWire nodes (the jacks' output, the combo jack's mic)
+    that don't exist right now. Cheap: `pw-cli ls Node` is 2 KB of text."""
+    try:
+        out = _run(["pw-cli", "ls", "Node"])
+    except Exception:
+        return []  # can't tell: don't act on it
+    return [n for n in CARRIER_NODES if f'"{n}"' not in out]
+
+
 def ensure_carrier_profile() -> None:
-    """Put the carrier's sound card on the profile that routes both playback and the mic."""
+    """Put the carrier's sound card on the profile that routes both playback and
+    the mic, and make sure that profile's nodes exist.
+
+    They can be missing with the profile set: at boot PipeWire opened the card
+    before its routing was switched on ("MultiMedia1: ASoC: no backend DAIs
+    enabled", then "playback open failed: Invalid argument"), and WirePlumber
+    gave up on both nodes. The app then opened PipeWire's dummy sink in their
+    place and played into nothing, without an error. Switching the profile off
+    and on again makes WirePlumber create them afresh."""
     objs = _pw_dump()
     dev = _carrier_device(objs)
     if dev is None:
         return
     params = dev.get("info", {}).get("params", {})
     current = [p.get("name") for p in params.get("Profile", [])]
-    if CARRIER_PROFILE in current:
+    index = next((p["index"] for p in params.get("EnumProfile", []) if p.get("name") == CARRIER_PROFILE), None)
+    if index is None:
         return
-    for p in params.get("EnumProfile", []):
-        if p.get("name") == CARRIER_PROFILE:
-            try:
-                _run(["pw-cli", "set-param", str(dev["id"]), "Profile", json.dumps({"index": p["index"], "save": True})])
-                log.info("sound card profile %s -> %s", current, CARRIER_PROFILE)
-            except Exception as e:
-                log.warning("could not switch the sound card profile: %s", e)
+    try:
+        if CARRIER_PROFILE not in current:
+            _run(["pw-cli", "set-param", str(dev["id"]), "Profile", json.dumps({"index": index, "save": True})])
+            log.info("sound card profile %s -> %s", current, CARRIER_PROFILE)
+        else:
+            names = {str(o.get("info", {}).get("props", {}).get("node.name", "")) for o in objs}
+            missing = [n for n in CARRIER_NODES if n not in names]
+            if not missing:
+                return
+            log.warning("sound card nodes missing (%s): switching its profile off and on", ", ".join(missing))
+            off = next((p["index"] for p in params.get("EnumProfile", []) if p.get("name") == "off"), 0)
+            _run(["pw-cli", "set-param", str(dev["id"]), "Profile", json.dumps({"index": off, "save": False})])
+            time.sleep(1.0)
+            _run(["pw-cli", "set-param", str(dev["id"]), "Profile", json.dumps({"index": index, "save": True})])
+    except Exception as e:
+        log.warning("could not switch the sound card profile: %s", e)
+        return
+    for _ in range(30):  # the nodes take a moment to appear
+        if not carrier_nodes_missing():
             return
+        time.sleep(0.2)
+    log.warning("sound card nodes still missing: %s", ", ".join(carrier_nodes_missing()))
 
 
 def list_devices() -> dict:
@@ -182,6 +249,7 @@ def list_devices() -> dict:
         "outputs": [{"id": "jack:1", "label": "Media Carrier jacks"}]
         + usb("arduino.app_peripherals.speaker", "ALSASpeaker"),
         "ports": [{"id": k, "label": v} for k, v in PORTS.items()],
+        "splits": [{"id": k, "label": v} for k, v in SPLITS.items()],
     }
 
 

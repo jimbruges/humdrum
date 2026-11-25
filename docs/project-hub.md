@@ -7,8 +7,9 @@ upload them to Project Hub where they appear.
 
 > **Before publishing:** headphones, mic (headset or a real mic through a splitter),
 > Bluetooth music and the captive portal have all been run on the board. The
-> Media Carrier's balanced **line out** hasn't been tried with a mixer yet, so check
-> that step against your build, and add a licence file to the repository (see
+> Media Carrier's balanced **line out**, and the split that puts the mic and the
+> music on separate jacks, haven't been tried with a mixer yet, so check that step
+> against your build, and add a licence file to the repository (see
 > *Credits and licence*).
 
 ---
@@ -133,11 +134,13 @@ phone ─► Wi-Fi hotspot ─► captive portal ─► web UI (settings, upload
 1. **Listen.** The engine reads the mic in 512-sample blocks at 48 kHz. A steep
    rumble filter and a noise gate that learns the room's noise floor keep hiss out
    of the effects. The phone's music arrives over Bluetooth through PipeWire, in
-   stereo, into a short jitter buffer that follows the phone's clock with a
-   windowed-sinc resampler.
+   stereo. PipeWire already locks it to the sound card's clock, so it's copied
+   sample for sample, behind a 150 ms cushion that rides out the radio's bad
+   moments (a windowed-sinc resampler steps in only if the level drifts).
 2. **Transform.** Two effect banks: one for the mic, one for the phone and the pads.
 3. **Play.** Everything is mixed, a look-ahead limiter catches peaks, and the result
-   goes out in stereo to the headphones (or the line out).
+   goes out in stereo to the headphones (or the line out). Or the mic and the music
+   go out separately, one per jack, for two channels on a mixer (see *Tips*).
 4. **Control.** The microcontroller scans the Qwiic bus every second, so modules can
    be plugged in while it runs. It sends pad and knob events to Python over the
    Router Bridge, and Python sends back the pad LEDs, the Pixels meters and the LED
@@ -263,7 +266,7 @@ if the controller ever resets.
 
 [VIDEO: pairing a phone, then skipping tracks with the Bluetooth pads while the matrix scrolls the title]
 
-### Three bugs worth knowing about
+### Five bugs worth knowing about
 
 Getting the audio right took longer than everything else together. If you build on
 the UNO Q, these will save you days:
@@ -282,6 +285,20 @@ the UNO Q, these will save you days:
   recomputed every pad's waveform preview while holding Python's GIL, and the
   audio thread missed its deadline: one block of silence. Caching the previews,
   coalescing updates and a 1 ms GIL switch interval fixed it.
+- **The mic got later and later over a gig.** Every missed deadline made the output
+  play a moment of silence while the mic kept recording, and that difference stayed
+  for good: after one gig the mic was 163 ms behind. The engine now watches how much
+  audio is in flight (pyalsaaudio's `avail()` on both sides) and puts it back after a
+  dropout. The dropouts mostly went too: PipeWire now gets realtime priority (rtkit
+  refuses a user with no login session, so the installer raises the user service's
+  limits), the DJ filter is designed once at start instead of on every knob step,
+  and the web server's replies no longer walk the app's state in Python. Mic to
+  output through the app is now about 33 ms.
+- **A knob went dead mid-set.** The sketch threw away any knob reading more than 40
+  steps from the last one as corrupted, but never moved on from it. When a knob
+  restarted (a dip in the Qwiic power) and counted from 0 again, every reading after
+  that was thrown away. Now three readings in a row that agree become the knob's new
+  position.
 
 ### Web UI and the QR code
 
@@ -426,12 +443,20 @@ sudo apt update && sudo apt install linux-image-7.0.14-arduino1+
 sudo reboot
 ```
 
-**Bluetooth and audio.** Run the installer once. It sets up the pairing helper, the
-PipeWire/WirePlumber rules (including the 16-bit fix) and classic-only Bluetooth:
+**Bluetooth and audio.** Run the installer once, then reboot. It sets up the pairing
+helper, the PipeWire/WirePlumber rules (including the 16-bit fix), classic-only
+Bluetooth as a music receiver only (no headset profile, so a laptop never drops to
+call-quality audio), realtime priority for the audio server and the CPU at full speed:
 
 ```bash
 cd ~/ArduinoApps/humdrum/host/bluetooth && sudo ./install.sh
 ```
+
+```bash
+sudo reboot
+```
+
+A phone or laptop paired before the installer: forget HUMDRUM on it and pair again.
 
 Then set up the hotspot once, on the board:
 
@@ -448,7 +473,8 @@ network. `sudo humdrum-portal off` switches back.
 
 **Audio devices:** the defaults (`jack:1` in and out, the Media Carrier) work. Pick
 the outputs in the web UI's settings: headphones (the combo jack), line out or ear
-out, or several at once.
+out, or several at once. *Mic and music* sends the mic and the music to separate
+jacks.
 
 ---
 
@@ -456,6 +482,12 @@ out, or several at once.
 
 - **Use a balanced input on the mixer.** The Media Carrier's line out is mono
   differential, so a TRS cable into a balanced input gives the cleanest signal.
+- **Mic and music on separate mixer channels.** Line out and ear out play the left
+  channel; only the headphone jack carries the right. Set *mic and music* to
+  *mic on line out*, take line out to the mixer's mic channel, and take the music
+  from the headphone jack's right channel with a 3.5 mm stereo-to-two-mono cable
+  (its red leg) into a line input. *Music on line out* swaps them. Each side has its
+  own limiter, so a loud voice never turns the music down.
 - **The mic jack wants a TRRS (CTIA) plug**, like a phone headset. For a real mic,
   use a TRRS splitter. A hot mic clips the codec at first; the app notices and pads
   the codec's gain down by itself (*mic input pad* in settings).
